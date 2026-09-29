@@ -32,11 +32,13 @@ Bhubaneswar, India \\
 \maketitle
 
 \begin{abstract}
-THE ABSTRACT OF THIS DOCUMENT IS YET TO BE UPDATED. I am learning \LaTeX\ as a part of this research.
+	High-throughput Software-Defined Networking (SDN) data planes require exact-match flow tables that execute lookups and updates within strict line-rate time budgets[cite: 1]. While classical cuckoo hashing provides optimal $O(1)$ worst-case lookup latency using a small constant number of memory probes, its insertion procedure relies on unbounded eviction chains[cite: 1, 2]. When displacement sequences enter closed loops or long random walks, classical cuckoo hashing incurs significant insertion tail latency or triggers catastrophic $O(n)$ full-table rehashes[cite: 1, 2]. Existing stash-based theoretical models treat the stash as a passive fallback after an unbounded eviction search, whereas systems-level networking implementations prioritize query throughput without guaranteeing deterministic worst-case insertion bounds[cite: 1, 3].
+	
+	This paper introduces a $d$-ary cuckoo hashing scheme with explicitly bounded displacement ($\texttt{MaxKicks}$) and early stash fallback designed specifically for line-rate exact-match flow tables[cite: 1]. By capping eviction chains at a fixed constant independent of table size $n$, displaced keys are proactively routed to a small Kirsch-style stash before exhaustive search cascades occur[cite: 1, 3]. Stash overflows trigger an incremental rehash operation ($\text{RehashStash}$) re-inserting only $O(s)$ stashed keys, completely eliminating full-table rebuilds during operational updates[cite: 1]. Theoretical analysis proves deterministic $O(1)$ worst-case per-insertion latency, derives non-vanishing stash-routing probabilities $p(\texttt{MaxKicks}, \varepsilon)$, and establishes stash-overflow bounds[cite: 1, 4]. Empirical evaluations demonstrate zero full-table rehashes across $10^7$ dynamic updates at load factors up to $92\%$, outperforming classical cuckoo hashing and linear probing in tail latency predictability[cite: 1, 3].
 \end{abstract}
 
 \begin{IEEEkeywords}
-SDN, hashtables, d-ary cuckoo, bloom filter, flow tables
+	Software-Defined Networking, Flow Tables, Cuckoo Hashing, Bounded Displacement, Stash Mechanisms, Deterministic Latency, Line-Rate Packet Processing
 \end{IEEEkeywords}
 
 \section{Introduction}
