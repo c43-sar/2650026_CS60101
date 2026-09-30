@@ -6,8 +6,14 @@
 % -----------------------------------------------------------------------------
 \usepackage{url}
 \usepackage{cite}
+\usepackage{tikz}
+\usetikzlibrary{positioning, fit, arrows.meta, calc}
 \usepackage{amsmath,amssymb,amsfonts}
+\let\proof\undefined
+\let\endproof\undefined
 \usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
@@ -23,7 +29,8 @@
     basicstyle=\scriptsize\ttfamily,
     numbers=left,
     numberstyle=\tiny,
-    numbersep=4pt,
+    numbersep=6pt,
+    xleftmargin=8pt,
     frame=single,
     breaklines=true,
     breakatwhitespace=false,
@@ -48,9 +55,12 @@
 
 \title{Cuckoo Hashing with Bounded Displacement for Exact-Match Flow Tables}
 
-\author{\IEEEauthorblockN{Anonymous Author(s)}
-\IEEEauthorblockA{Manuscript prepared for journal-oriented pre-submission review\\
-Affiliation and contact information intentionally anonymized}}
+\author{\IEEEauthorblockN{Soumyajit Kolay}
+	\IEEEauthorblockA{\textit{School of Computer Engineering} \\
+		\textit{KIIT Deemed University}\\
+		Bhubaneswar, India \\
+		2650026@kiit.ac.in}
+}
 
 \maketitle
 
