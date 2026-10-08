@@ -16,7 +16,6 @@
 \usepackage{xcolor}
 \usepackage{booktabs}
 
-% Small caps inside italic theorem bodies: Times has no italic small caps, so force upright
 \let\oldtextsc\textsc
 \renewcommand{\textsc}[1]{\textup{\oldtextsc{#1}}}
 \setlength{\emergencystretch}{2em}
@@ -43,135 +42,168 @@
 	
 	\maketitle
 	
+	% ======================================================================
+	% ABSTRACT -- human-written. Insert here.
+	% ======================================================================
+	
 	\begin{abstract}
-		High-throughput Software-Defined Networking (SDN) data planes require exact-match flow tables that execute lookups and updates within strict line-rate time budgets. While classical cuckoo hashing provides optimal $O(1)$ worst-case lookup latency using a small constant number of memory probes, its insertion procedure relies on unbounded eviction chains. When displacement sequences enter closed loops or long random walks, classical cuckoo hashing incurs significant insertion tail latency or triggers catastrophic $O(n)$ full-table rehashes. Existing stash-based theoretical models treat the stash as a passive fallback after an unbounded eviction search, whereas systems-level networking implementations prioritize query throughput without guaranteeing deterministic worst-case insertion bounds.
-		
-		This paper introduces a $d$-ary cuckoo hashing scheme with explicitly bounded displacement ($\mathtt{MaxKicks}$) and early stash fallback designed specifically for line-rate exact-match flow tables. By capping eviction chains at a fixed constant independent of table size $n$, displaced keys are proactively routed to a small Kirsch-style stash before exhaustive search cascades occur. Stash overflows trigger an incremental rehash operation ($\text{RehashStash}$) re-inserting only $O(s)$ stashed keys, completely eliminating full-table rebuilds during operational updates. Theoretical analysis proves deterministic $O(1)$ worst-case per-insertion latency, derives non-vanishing stash-routing probabilities $p(\mathtt{MaxKicks}, \varepsilon)$, and establishes stash-overflow bounds. Empirical evaluations demonstrate zero full-table rehashes across $10^7$ dynamic updates at load factors up to $92\%$, outperforming classical cuckoo hashing and linear probing in tail latency predictability.
+		This paper deals in discussing a variant of $d$-ary Cuckoo Hashing Tables that considers bounded displacement to ensure a higher value for recommended load, on which it does with lesser number of full rehashes as compared to previous algorithms. This paper is still in progress and serves as a \LaTeX learning playground for the author.
 	\end{abstract}
 	
 	\begin{IEEEkeywords}
 		Software-Defined Networking, Flow Tables, Cuckoo Hashing, Bounded Displacement, Stash Mechanisms, Deterministic Latency, Line-Rate Packet Processing
 	\end{IEEEkeywords}
 	
+	% ======================================================================
+	% I. INTRODUCTION -- human-written. Insert here.
+	% Outline + citation list + terms-to-define already agreed on separately;
+	% not reproduced in this file per your instruction.
+	% ======================================================================
+	
 	\section{Introduction}
+	Para 1 — "Exact-Match Flow Tables."
+	line-rate dictionary requirement; fixed per-packet time budget
 	
-	\subsection{The Line-Rate Dictionary Imperative in Software-Defined Data Planes}
-	The dictionary abstraction---supporting insertion, deletion, and membership queries over a dynamic key set---sits at the core of nearly every high-throughput networking data plane, and nowhere is its performance more scrutinized than in the exact-match flow table of a software-defined switch~\cite{pagh2004cuckoo}. Every packet traversing the data plane must be matched against this table at line rate, so a single slow lookup anywhere in the tail of the latency distribution translates directly into queuing delay or packet loss. Classical collision-resolution schemes such as chained hashing and open addressing with linear probing offer excellent average-case behavior but degrade to logarithmic or, in adversarial cases, linear worst-case lookup cost as the table fills---a property that is simply incompatible with a hardware or software pipeline built around a fixed per-packet time budget.
+	\subsection{Literature Review}
+	Para 2 — "Classical Cuckoo Hashing."
+	Pagh-Rodler; 2-way displacement; O(1) worst-case lookup
 	
-	In modern high-speed packet processing pipelines---whether implemented in ASIC hardware blocks, FPGA logic, or user-space software drivers like the Data Plane Development Kit (DPDK)---packet processing frames are constrained by hard temporal windows. For example, at $100\text{~Gbps}$, a switch processing $64$-byte minimum-sized Ethernet frames must process a new packet every $6.72\text{~nanoseconds}$ per port pipeline. Under such stringent throughput constraints, data structures with non-deterministic access times introduce catastrophic processing bottlenecks.
+	Para 3 — "The Full-Rehash Catastrophe."
+	$MaxLoop = \Theta(log n)$; O(n) full rehash; why that's unacceptable at line rate
 	
-	Chained hashing resolution relies on pointer traversal through dynamically allocated linked lists. In modern processor architectures, pointer chasing generates non-sequential memory accesses that trigger L1/L2 CPU cache misses, forcing pipeline stalls while waiting for main memory (DRAM) read cycles. Open addressing with linear probing avoids pointer chasing by storing keys in contiguous array slots, but introduces key clustering~\cite{knuth1998art}. As the table load factor $\alpha = n/r$ approaches capacity, contiguous runs of occupied slots merge into large clusters, causing lookup and insertion probe lengths to scale as:
+	Para 4 — "Stash-Based Mitigation." (chronological)
+	Kirsch/Kutzelnigg/Aumüller/Fountoulakis-Panagiotou — reduces rehash odds,
+	but all still assume unbounded search before stash
+	
+	Para 5 — "Networking-Specific Variants." (chronological)
+	Pontarelli x2/Le Scouarnec/Kuszmaul/Noble/Minaud-Papamanthou/TECache —
+	throughput/energy-focused, no worst-case insertion bound
+	
+	[one-line forward pointer: Sec. II quantifies baseline rehash frequency first]
+	
+	\subsection{Implementation-Driven Corrections}
+	Building a reference implementation surfaced one correctness issue not
+	apparent from the pseudocode alone. The initial \textsc{RehashStash}
+	design redrew a fresh global hash-function tuple on every stash
+	overflow and reinserted only the stashed key(s). This silently orphaned
+	every key already resident in the main tables: their physical slot had
+	been computed under the \emph{old} hash functions, so a lookup issued
+	under the new ones would almost never find them. The anomaly first
+	appeared as an implausible positive-lookup probe-count distribution
+	rather than as an outright failure, and was only isolated with a
+	standalone occupancy diagnostic that showed the physical key
+	distribution contradicted the reported lookup behavior. The corrected
+	design keeps the global hash functions fixed for the table's lifetime
+	and instead retries the stashed key's bounded-kick placement with
+	fresh \emph{randomized eviction choices} only -- simpler than the
+	original design, and it removes the hazard entirely while preserving
+	the $O(s)$ incremental-rehash cost. A small recursion-depth guard was
+	added defensively against pathological repeated-retry cases, though it
+	was never observed to trigger.
+	
+	A second, lower-level lesson concerned evaluation honesty rather than
+	correctness: a single benchmark point near Pagh--Rodler's own
+	conservative recommended load ($\alpha\!\approx\!1/3$) shows
+	essentially zero full rehashes for the classical baseline, which would
+	understate the exact failure mode this paper is motivated by. Only
+	sweeping load factor toward the $d$=2 structural ceiling
+	($\alpha\!\approx\!0.495$) surfaces the real tail blow-up, indicating
+	that near-ceiling operating points must be tested explicitly rather
+	than only "typical" ones.
+	
+	\subsection{Contributions}
+	Para 7 — "Contributions."
+	bulleted, each tagged to its section.
+	
+	\section{Modeling Rehash Frequency in Classical Cuckoo Hashing}
+	\label{sec:modeling}
+	
+	Before presenting the proposed design, this section quantifies the
+	failure mode it targets. In classical $2$-way cuckoo hashing, an
+	insertion's eviction loop is bounded by
+	$\mathtt{MaxLoop} = \lceil 3\log_{1+\varepsilon} r \rceil$, where
+	$r=(1+\varepsilon)n$ is the table capacity~\cite{pagh2004cuckoo}. Pagh and
+	Rodler show the probability that a single insertion exhausts
+	$\mathtt{MaxLoop}$ -- and therefore triggers a full-table rehash -- is
+	bounded by
 	\begin{equation}
-		\mathbb{E}[\text{Probes}] \approx \frac{1}{2} \left( 1 + \frac{1}{(1-\alpha)^2} \right)
+		\Pr[\text{rehash triggered}] \le 2(1+\varepsilon)^{-\frac{2\cdot\mathtt{MaxLoop}-1}{3}+1} + O(n^{-2}),
+		\label{eq:baseline-rehash-prob}
 	\end{equation}
-	Under traffic spikes or adversarial key distributions designed to maximize hash collisions, probe lengths degrade to linear complexity $O(n)$, exhausting processing budgets and causing switch ingress buffer overflows~\cite{knuth1998art}.
+	the same path-counting bound used later in
+	Section~\ref{sec:theory}B, evaluated here at $t=\mathtt{MaxLoop}$ instead
+	of a fixed constant. Because $\mathtt{MaxLoop}$ grows with $n$, this
+	probability is small \emph{in the asymptotic limit} -- but $\varepsilon$
+	is fixed by the table's slack at construction time, and for a given
+	finite $n$ the realized rehash frequency depends heavily on how close
+	the load factor $\alpha=n/r$ sits to the $d$-ary structural ceiling
+	(e.g.\ $\approx 50\%$ for $d=2$~\cite{pagh2004cuckoo}). Eq.~\ref{eq:baseline-rehash-prob}
+	predicts that rehash frequency should rise sharply as $\alpha$
+	approaches that ceiling, independent of $n$'s asymptotic comfort.
 	
-	\subsection{Classical Cuckoo Hashing and the Full-Rehash Catastrophe}
-	Cuckoo hashing was introduced by Pagh and Rodler as a direct answer to this problem~\cite{pagh2004cuckoo}. By allowing each key two candidate locations across two tables and permitting keys already resident in the table to be displaced (``kicked'') to their alternate location on collision, the scheme guarantees exactly two probes for every lookup---worst case, not merely expected. This property alone made cuckoo hashing an immediate candidate for line-rate dictionaries, and it has since been adopted widely in networking contexts precisely for this reason. Yet Pagh and Rodler's original construction carries a structural cost that later work has spent almost two decades trying to manage: when a chain of displacements returns to a previously visited cell, the insertion procedure has entered a cycle, and the only recourse in the original scheme is to abandon the current hash functions entirely and rehash the full table---an $O(n)$ operation that, however rare, is catastrophic if it occurs during a latency-sensitive insertion at line rate~\cite{pagh2004cuckoo}.
-	
-	Formally, Pagh and Rodler's insertion routine relies on an eviction bound $\mathtt{MaxLoop} = \lceil 3 \log_{1+\varepsilon} r \rceil$, where $r$ is the table capacity and $\varepsilon > 0$ represents the table slack parameter~\cite{pagh2004cuckoo}. While limiting $\mathtt{MaxLoop}$ guarantees that the probability of exhausting the search sequence remains $O(n^{-2})$, it forces the insertion algorithm's worst-case processing time to grow logarithmically with table size:
-	$$\text{Worst-Case Insertion Latency} = \Theta(\log n)$$
-	In software-defined networking deployments where the control plane continuously issues dynamic flow table modifications (\texttt{FLOW\_MOD} messages in OpenFlow) at rates exceeding tens of thousands of updates per second, an $O(n)$ full-table rebuild freezes flow table modifications. During a full-table rehash, the switch must either buffer incoming unmapped control messages or drop incoming data plane packets, leading to switch control loop instability and severe network latency spikes.
-	
-	\subsection{Literature Expansion and Taxonomic Foundations}
-	The subsequent literature can be read as a sustained effort to defer, shrink, or altogether avoid this full-table rehash~\cite{kirsch2009stash, kutzelnigg2010stash, aumuller2014explicit, fountoulakis2012sharp}. Kirsch, Mitzenmacher, and Wieder showed that reserving a small constant-sized side table---a stash---for the rare items that fail to settle after a bounded number of displacements reduces the probability of ever needing a full rehash from polynomial to a much smaller $\Theta(n^{-s-1})$ for a stash of size $s$, with a stash of only three or four entries already yielding a dramatic practical improvement~\cite{kirsch2009stash}. Kutzelnigg subsequently tightened this analysis, showing that the same failure-probability bounds hold even without the extra verification step Kirsch et al.'s original proof required, simplifying the practical insertion routine~\cite{kutzelnigg2010stash}. Aumüller, Dietzfelbinger, and Woelfel then relaxed the hash-function assumptions underlying the stash guarantee, proving that simple, explicit 2-independent hash families suffice to preserve the $O(n^{-s-1})$ failure bound and $O(s)$ query time, removing the reliance on fully random hash functions that had limited the scheme's practicality~\cite{aumuller2014explicit}. On the load-capacity side, Fountoulakis and Panagiotou resolved a long-open question by deriving the exact load thresholds for $d$-ary cuckoo hashing with $d \ge 3$ choices per key---for instance, showing that three choices already permit roughly 92\% table utilization---giving practitioners, for the first time, precise rather than merely empirical guidance on how sparse a $d$-ary table must be kept~\cite{fountoulakis2012sharp}.
-	
-	A parallel line of work adapted cuckoo hashing specifically to the networking substrate rather than treating it as a general-purpose dictionary~\cite{pontarelli2016parallel, pontarelli2016cuckoocache, lescouarnec2018cuckoopp, minaud2023generalized, noble2021explicit}. Pontarelli et al. proposed a parallel $d$-pipeline implementation targeting ASIC and FPGA memories accessed concurrently, reporting throughput gains of up to 60\% over prior parallel cuckoo designs for exact-match lookup~\cite{pontarelli2016parallel}, and later introduced Cuckoo Cache, which exploits the skewed popularity distribution of real network flows by biasing frequently accessed items toward the first-probed table, yielding substantial query-throughput improvements on real traffic traces without altering the underlying cuckoo guarantees~\cite{pontarelli2016cuckoocache}. Le Scouarnec pushed cache-efficiency further on commodity CPUs with Cuckoo++, an implementation tailored to Intel Xeon cache-line behavior that outperformed the widely used DPDK hash table by 45--70\% on lookups while leaving the classical theoretical analysis of cuckoo hashing untouched~\cite{lescouarnec2018cuckoopp}. Minaud and Papamanthou revisited and corrected a subtle error in the original multi-item-per-bucket stash analysis of Kirsch et al., establishing the true asymptotic failure probability as $\Theta(n^{-d-s})$ rather than the previously claimed bound~\cite{minaud2023generalized}---a correction of direct consequence to any system, like the one proposed here, that relies on stash-failure guarantees for its worst-case claims. Noble subsequently closed a longstanding gap in the theory by deriving the first explicit, closed-form failure-probability bounds for cuckoo hashing with a stash of arbitrary---not merely constant---size, removing the asymptotic hedging present in all prior stash analyses~\cite{noble2021explicit}.
-	
-	Most recently, Kuszmaul and Mitzenmacher introduced bubble-up cuckoo hashing, a $d$-ary insertion policy that achieves an essentially optimal number of hash locations while guaranteeing $O(\delta^{-1})$ expected insertion time at any load factor $1-\delta$ and $O(1)$ expected positive-query time independent of $d$---the strongest theoretical insertion-time guarantee for $d$-ary cuckoo hashing to date~\cite{kuszmaul2025bubbling}. On the hardware side, Megías et al. designed an FPGA implementation that exploits parallel insertion iterations to cut the number of reallocation rounds by more than 60\% at loads beyond 95\%, targeting exactly the real-time communications-network setting this work is concerned with~\cite{megias2025minimizing}. Closest of all to the present application, Xiong et al. proposed TECache, a nearly conflict-free hashing scheme for TCAM-backed SDN flow tables that uses three candidate locations with co-directional kicking to sustain high cache-hit rates and substantial energy savings under real backbone traffic~\cite{xiong2025tecache}---a system that, notably, optimizes for hit rate and power rather than for a bound on worst-case insertion cost. Tripathi et al. most recently proposed a new set of performance indicators for sequential cuckoo hashing variants, aimed at giving practitioners richer evaluation vocabulary than raw throughput alone~\cite{tripathi2026performance}.
-	
-	To systematically contextualize these developments across theoretical and applied networking domains, Table~\ref{tab:lit_taxonomy} provides a taxonomy of existing cuckoo hashing research, classifying designs by candidate degree, eviction limits, stash mechanisms, and primary design trade-offs.
-	
-	\begin{table*}[t]
-		\caption{Taxonomy of Cuckoo Hashing Variants in Algorithmic Theory and Networking Data Planes}
-		\label{tab:lit_taxonomy}
-		\centering
-		\resizebox{\textwidth}{!}{%
-			\begin{tabular}{|l|c|c|c|l|l|}
-				\hline
-				\textbf{Scheme / Architecture} & \textbf{Choices ($d$)} & \textbf{Eviction Bound} & \textbf{Stash Mechanism} & \textbf{Primary Target Metric} & \textbf{Main Limitation} \\ \hline
-				Classical Cuckoo~\cite{pagh2004cuckoo} & $d=2$ & $\Theta(\log n)$ & None & $O(1)$ Worst-case Lookup & $O(n)$ Full Rehash on Cycle \\ \hline
-				Stashed Cuckoo~\cite{kirsch2009stash, kutzelnigg2010stash} & $d=2$ & $\Theta(\log n)$ & Passive ($s=4$) & Rehash Reduction $\Theta(n^{-s-1})$ & Unbounded Eviction Chains \\ \hline
-				$d$-ary Cuckoo Thresholds~\cite{fountoulakis2012sharp} & $d \ge 3$ & Unbounded & Optional & High Load Capacity ($\alpha \ge 91.7\%$) & Complex Cycle Graph Analysis \\ \hline
-				Parallel $d$-Pipeline~\cite{pontarelli2016parallel} & $d \ge 2$ & Hardware Pipeline & None & Hardware Memory Bandwidth & Fixed Pipeline Latency Overhead \\ \hline
-				Cuckoo Cache~\cite{pontarelli2016cuckoocache} & $d=2$ & Skewed Probes & None & Skewed Traffic Throughput & No Hard Insertion Time Bound \\ \hline
-				Cuckoo++~\cite{lescouarnec2018cuckoopp} & $d=2..4$ & SIMD Vectorized & Bucket-based & Intel CPU Cacheline Efficiency & Unbounded Tail Latency Spikes \\ \hline
-				Minaud--Papamanthou~\cite{minaud2023generalized} & $d \ge 2$ & Multi-item Buckets & Corrected ($\Theta(n^{-d-s})$) & Tight Theoretical Bounds & Theoretical Model Only \\ \hline
-				Bubble-Up Cuckoo~\cite{kuszmaul2025bubbling} & $d \ge 3$ & $O(\delta^{-1})$ Expected & Graph Augmenting & Optimal Expected Insertion & Offline Graph Model \\ \hline
-				TECache~\cite{xiong2025tecache} & $d=3$ & Co-directional Kicks & TCAM Fallback & TCAM Energy Savings & Unbounded Worst-case Update \\ \hline
-				\textbf{Proposed Bounded Scheme} & $d \ge 3$ & $\mathtt{MaxKicks} = O(1)$ & Proactive ($s=4$) & Deterministic Worst-case Update & Stash Sizing Trade-off \\ \hline
-			\end{tabular}%
-		}
-	\end{table*}
-	
-	\subsection{The Critical Research Gap and Core Contributions}
-	The stash-based line of theoretical work~\cite{kirsch2009stash, kutzelnigg2010stash, aumuller2014explicit, minaud2023generalized, noble2021explicit} establishes precisely \emph{how likely} a full rehash is for a given stash size, but every one of these analyses assumes the classical insertion procedure: displacement continues, essentially without an explicit external bound, until either an empty slot is found or a cycle is detected, at which point the stash is invoked~\cite{kirsch2009stash, minaud2023generalized}. None of them treat the length of the eviction chain itself as a tunable, deliberately constrained parameter---the stash is a safety net for whatever the unbounded process eventually fails to place, not a fallback triggered \emph{early} by design~\cite{kirsch2009stash}. Conversely, the networking-systems line of work~\cite{pontarelli2016parallel, pontarelli2016cuckoocache, lescouarnec2018cuckoopp, xiong2025tecache} optimizes throughput, cache efficiency, or energy consumption on real traffic, but treats worst-case insertion cost as a secondary concern; TECache in particular reports hit rate and power savings but offers no guarantee on how long a single insertion can take before either succeeding or falling back to a full rehash~\cite{xiong2025tecache}. The most recent theoretical advance, bubble-up cuckoo hashing~\cite{kuszmaul2025bubbling}, achieves a strong \emph{expected} insertion-time bound at high load, but it is an offline-insertion-time result validated against random-graph theory, not an online scheme instrumented against the specific metrics---worst-case per-insertion latency, stash utilization, and rehash frequency under a synthetic or real flow-table workload---that a line-rate SDN deployment must be evaluated on~\cite{kuszmaul2025bubbling}.
-	
-	The gap, concretely, is this: no existing construction couples an \emph{explicitly and tightly bounded} kick-chain length with \emph{early} stash fallback---triggering the stash before the classical process would otherwise continue searching---while confining rehashing to the rare event of stash overflow rather than ordinary cycle detection, and then characterizes the resulting system on the metrics that matter for exact-match flow tables specifically: worst-case and average lookup latency, insertion success rate, stash utilization, and memory overhead, benchmarked against the standard baselines of chained hashing, unstashed 2-way cuckoo hashing, and linear probing on real or synthetic microflow traces.
-	
-	This paper closes that gap by treating the kick-chain bound itself as the primary design variable rather than an afterthought. The proposed construction combines $d$-ary candidate slot selection~\cite{fountoulakis2012sharp, kuszmaul2025bubbling} with a small Kirsch-style stash~\cite{kirsch2009stash} whose sizing is informed by Noble's tightened, general-stash bounds~\cite{noble2021explicit} and corrected against the Minaud--Papamanthou erratum~\cite{minaud2023generalized}, but departs from all of these in one specific respect: the eviction procedure is capped at a deliberately short $\mathtt{MaxKicks}$ bound, well below what a cycle-detection-only policy would tolerate, so that displaced keys are routed to the stash \emph{proactively} rather than only after the classical process has exhausted its search. Rehashing is triggered exclusively by stash overflow and is performed incrementally---reinserting only the stash's contents---rather than as a full-table rebuild, directly targeting the catastrophic-cost scenario that has motivated every stash-based scheme since Kirsch et al.~\cite{kirsch2009stash} without adopting their assumption of an effectively unbounded search process beforehand. A load-factor monitor, sized using the exact thresholds established by Fountoulakis and Panagiotou~\cite{fountoulakis2012sharp}, resizes the table proactively rather than reactively, keeping the stash-overflow event itself rare by construction. Fig.~\ref{fig:paradigms} contrasts the resulting insertion workflow with the classical one.
-	
-	The resulting scheme is positioned deliberately alongside, rather than in competition with, the closest systems-level precedent: TECache~\cite{xiong2025tecache} demonstrates that a cuckoo-style cache can sustain high hit rates and energy savings for SDN TCAM flow tables, but offers no bounded worst-case insertion guarantee; this work supplies exactly that guarantee, evaluated using the same class of real and synthetic exact-match traffic that TECache and Cuckoo Cache~\cite{pontarelli2016cuckoocache} use to validate throughput, but reoriented around the central empirical question a bounded-displacement design raises: how short can the kick-chain bound be made before the resulting rise in stash utilization and rehash frequency becomes unacceptable, at a given table load factor. Answering that question, with the explicit theoretical grounding provided by~\cite{noble2021explicit} and the corrected bounds of~\cite{minaud2023generalized}, is the specific contribution this paper makes to the cuckoo hashing literature surveyed above.
-	
-	\begin{figure}[t]
-		\centering
-		\begin{tikzpicture}[
-			font=\footnotesize,
-			nd/.style={draw=black!70, rounded corners=2pt, minimum width=0.205\columnwidth, minimum height=0.95cm, align=center, inner sep=2pt, fill=gray!10},
-			bad/.style={nd, draw=red!60!black, fill=red!12},
-			good/.style={nd, draw=blue!55!black, fill=blue!12},
-			ar/.style={-{Stealth[length=4pt]}, thick},
-			lane/.style={font=\footnotesize\bfseries, anchor=west},
-			note/.style={font=\footnotesize\itshape, anchor=west}
-			]
-			\def\dx{0.265\columnwidth}
-			% ---- (a) classical ----
-			\node[lane] at (0,0) {(a) Classical cuckoo hashing};
-			\node[nd]  (a1) at (0.1025\columnwidth,-0.85) {Insert\\key};
-			\node[nd]  (a2) at ($(a1)+(\dx,0)$) {Unbounded\\kicks};
-			\node[nd]  (a3) at ($(a2)+(\dx,0)$) {Cycle or\\log bound};
-			\node[bad] (a4) at ($(a3)+(\dx,0)$) {Full-table\\rehash $O(n)$};
-			\draw[ar] (a1) -- (a2); \draw[ar] (a2) -- (a3); \draw[ar] (a3) -- (a4);
-			\node[note] at (0,-1.7) {Worst-case insertion: $\Theta(\log n)$ probes, then $O(n)$ rebuild};
-			% ---- (b) proposed ----
-			\node[lane] at (0,-2.45) {(b) Proposed: bounded displacement};
-			\node[nd]   (b1) at (0.1025\columnwidth,-3.3) {Insert\\key};
-			\node[good] (b2) at ($(b1)+(\dx,0)$) {At most\\$\mathtt{MaxKicks}$};
-			\node[good] (b3) at ($(b2)+(\dx,0)$) {Early\\stash};
-			\node[good] (b4) at ($(b3)+(\dx,0)$) {Stash-only\\rehash $O(s)$};
-			\draw[ar] (b1) -- (b2); \draw[ar] (b2) -- (b3); \draw[ar] (b3) -- (b4);
-			\node[note] at (0,-4.15) {Worst-case insertion: $O(1)$ probes, no full rebuild};
-		\end{tikzpicture}
-		\caption{Insertion workflow of classical cuckoo hashing (a) versus the proposed bounded-displacement scheme (b). Capping the kick chain routes displaced keys to the stash early, so only the stash contents are ever rehashed.}
-		\label{fig:paradigms}
-	\end{figure}
-	
-	Specifically, the core contributions of this paper are summarized as follows:
-	\begin{enumerate}
-		\item \textbf{Deterministic $O(1)$ Insertion Mechanics}: We propose a $d$-ary cuckoo hashing architecture that enforces a constant eviction chain limit ($\mathtt{MaxKicks}$), guaranteeing that every insertion executes in at most $d \cdot \mathtt{MaxKicks} + O(1)$ memory probes, thereby truncating the worst-case insertion latency tail by up to $442\times$ compared to classical schemes.
-		\item \textbf{Incremental Rehash Paradigm}: We replace catastrophic $O(n)$ full-table rebuilds with an incremental \texttt{RehashStash} operation that re-inserts only $O(s)$ stashed entries under fresh hash functions, eliminating flow table update freezes during live operation.
-		\item \textbf{Closed-Form Stash Modeling}: We derive non-vanishing per-insertion stash-routing probabilities $p(\mathtt{MaxKicks}, \varepsilon)$ and formulate multiplicative Chernoff overflow bounds corrected against multi-item bucket errors~\cite{minaud2023generalized}.
-		\item \textbf{Comprehensive Empirical Validation}: We benchmark the scheme across synthetic microflows and CAIDA backbone packet traces, showing zero full-table rehashes over $10^7$ updates at load factors up to $92\%$ with a 4-entry stash.
-	\end{enumerate}
-	
-	The remainder of this paper is organized as follows: Section~II formalizes the mathematical system model and specifies the exact pseudocode for all data plane operations. Section~III presents the formal theoretical proofs for worst-case latency bounds, stash routing probabilities, and amortized complexity. Section~IV presents memory hierarchy hardware and software design architectures. Section~V delivers empirical evaluations across traffic traces and comparative baselines. Section~VI addresses technical edge cases and analytical limitations. Finally, Section~VII concludes the paper.
+	This prediction is checked directly against a reference implementation
+	in Section~\ref{sec:eval}: TBD (\emph{technique}: measured directly from
+	the classical-cuckoo baseline in \texttt{bench.cpp} at two operating
+	points -- Pagh and Rodler's own recommended $\alpha\!\approx\!1/3$, and
+	a point near the $d{=}2$ ceiling, $\alpha\!\approx\!0.49$--$0.495$;
+	see Section~\ref{sec:eval}B). As with the modeling-before-design pattern
+	this section follows, Eq.~\ref{eq:baseline-rehash-prob} is not claimed
+	to predict exact rehash counts under correlated or adversarial
+	insertion orderings -- it motivates \emph{why} full-table rehashing is
+	the right failure mode to target, and gives a closed-form baseline the
+	proposed scheme's own bounds (Section~\ref{sec:theory}) are compared
+	against. The remainder of the paper addresses this failure mode
+	structurally rather than by tuning $\varepsilon$ or $\mathtt{MaxLoop}$
+	alone (see the Discussion, Section~\ref{sec:discussion}, for why tuning
+	$\mathtt{MaxLoop}$ down is not by itself a solution).
 	
 	\section{System Architecture \& Proposed Algorithm}
+	\label{sec:algorithm}
+	
+	\subsection{Design Goals}
+	Bounding the eviction chain and introducing a stash is a structural
+	departure from classical cuckoo hashing, and that departure introduces
+	four concerns that did not exist in the unbounded scheme. The
+	remainder of this paper is organized around resolving each:
+	\begin{enumerate}
+		\item[\textbf{G1}] \textbf{Bounded worst-case latency.} Every
+		insertion must complete in time independent of $n$
+		(Section~\ref{sec:theory}A).
+		\item[\textbf{G2}] \textbf{Rehash correctness.} Giving a stashed key
+		a fresh placement attempt must never silently break lookups for
+		keys already resident in the main tables
+		(Section~\ref{sec:algorithm}C, Section~\ref{sec:discussion}).
+		\item[\textbf{G3}] \textbf{Bounded stash pressure.} $\mathtt{MaxKicks}$
+		and stash capacity $s$ must be sized jointly against a quantified
+		stash-routing probability, not chosen arbitrarily
+		(Section~\ref{sec:theory}B--C, Section~\ref{sec:eval}D).
+		\item[\textbf{G4}] \textbf{Load-factor coupling.} $\mathtt{MaxKicks}$,
+		$s$, and the $d$-ary load threshold are not independent knobs;
+		operating near the hypergraph's structural ceiling changes the
+		whole routing-probability profile (Section~\ref{sec:theory}D).
+	\end{enumerate}
 	
 	\subsection{Formal Mathematical Definitions \& System Model}
-	Let $U = \{0, 1\}^w$ be the universe of $w$-bit flow identifiers (e.g., standard IPv4 5-tuples)~\cite{pagh2004cuckoo}. An exact-match flow table consists of $d \ge 2$ independent sub-tables $T_1, T_2, \dots, T_d$, each containing $m$ slots~\cite{pagh2004cuckoo}. The total capacity of the main table is $r = dm$ slots~\cite{pagh2004cuckoo}. The table maintains $n = |S|$ active microflows from a set $S \subset U$~\cite{pagh2004cuckoo}. The overall load factor is defined as:
+	Let $U = \{0, 1\}^w$ be the universe of $w$-bit flow identifiers (e.g.,
+	standard IPv4 5-tuples)~\cite{pagh2004cuckoo}. An exact-match flow table
+	consists of $d \ge 2$ independent sub-tables $T_1, \dots, T_d$, each
+	containing $m$ slots~\cite{pagh2004cuckoo}. The total capacity of the
+	main table is $r = dm$ slots. The table maintains $n = |S|$ active
+	microflows from a set $S \subset U$. The overall load factor is
 	\begin{equation}
-		\alpha = \frac{n}{r} = \frac{n}{dm}
+		\alpha = \frac{n}{r} = \frac{n}{dm}.
 	\end{equation}
-	
-	The dictionary uses $d$ uniform, independent hash functions drawn from a universal hash family $\mathcal{H}$:
+	The dictionary uses $d$ uniform, independent hash functions drawn from
+	a universal hash family $\mathcal{H}$:
 	\begin{equation}
-		h_i : U \to \{0, 1, \dots, m-1\}, \quad \forall i \in \{1, 2, \dots, d\}
+		h_i : U \to \{0, 1, \dots, m-1\}, \quad \forall i \in \{1, \dots, d\}.
 	\end{equation}
-	
-	Every stored flow key $x \in S$ resides either in one of its $d$ candidate sub-table locations $T_i[h_i(x)]$ or in an auxiliary content-addressable stash $\text{Stash}$ of capacity $s \ll n$~\cite{kirsch2009stash}. Empty table slots are denoted by $\bot$.
-	
-	This section gives the formal procedures implementing the design: bounded-length kick chains with early stash fallback, stash-overflow-triggered incremental rehashing, and proactive load-factor--based resizing~\cite{fountoulakis2012sharp}.
+	Every stored flow key $x \in S$ resides either in one of its $d$
+	candidate sub-table locations $T_i[h_i(x)]$ or in an auxiliary stash
+	$\text{Stash}$ of capacity $s \ll n$~\cite{kirsch2009stash}. Empty table
+	slots are denoted $\bot$. Hash functions $h_1,\dots,h_d$ are fixed for
+	the table's lifetime once any key has been placed under them (see
+	Algorithm~\ref{alg:rehashstash} and G2 above).
 	
 	\subsection{Algorithmic Specifications}
 	
@@ -200,7 +232,7 @@
 			\If{\textsc{Lookup}$(x) = \textsc{Found}$}
 			\State \Return \textsc{AlreadyPresent}
 			\EndIf
-			\If{$(n+1)/(dm) > \textsc{LoadThreshold}(d)$} \Comment{Sec.~III-C, \cite{fountoulakis2012sharp}}
+			\If{$(n+1)/(dm) > \textsc{LoadThreshold}(d)$} \Comment{\cite{fountoulakis2012sharp}}
 			\State \textsc{Resize}()
 			\EndIf
 			\State $cur \gets x$
@@ -211,7 +243,7 @@
 			\State \Return \textsc{Success}
 			\EndIf
 			\EndFor
-			\State $i \gets \textsc{ChooseCandidateIndex}(cur)$ \Comment{e.g.\ uniform random}
+			\State $i \gets \textsc{ChooseCandidateIndex}(cur)$ \Comment{uniform random}
 			\State $evicted \gets T_i[h_i(cur)]$; \quad $T_i[h_i(cur)] \gets cur$
 			\State $cur \gets evicted$
 			\EndFor
@@ -219,8 +251,8 @@
 			\State place $cur$ in \textsc{Stash}; \quad $n \gets n+1$
 			\State \Return \textsc{Success} \Comment{via stash}
 			\EndIf
-			\State \textsc{RehashStash}() \Comment{incremental --- Alg.~3}
-			\State \Return \textsc{Insert}$(x)$ \Comment{single retry after rehash}
+			\State \textsc{RehashStash}() \Comment{incremental --- Alg.~\ref{alg:rehashstash}}
+			\State \Return \textsc{Insert}$(x)$ \Comment{retry; depth-guarded, see Alg.~\ref{alg:rehashstash}}
 		\end{algorithmic}
 	\end{algorithm}
 	
@@ -228,10 +260,10 @@
 		\caption{\textsc{RehashStash}()}
 		\label{alg:rehashstash}
 		\begin{algorithmic}[1]
-			\State draw a fresh tuple $h_1', \dots, h_d'$ from the hash family
 			\State $S \gets$ contents of \textsc{Stash}; empty \textsc{Stash}
 			\For{each key $y \in S$}
-			\State reinsert $y$ using \textsc{Insert}, under $h_1', \dots, h_d'$
+			\State reinsert $y$ via \textsc{Insert}, \emph{same} $h_1,\dots,h_d$
+			\Comment{fresh randomized eviction path only -- see G2, Sec.~\ref{sec:discussion}}
 			\EndFor
 		\end{algorithmic}
 	\end{algorithm}
@@ -252,180 +284,207 @@
 		\end{algorithmic}
 	\end{algorithm}
 	
-	Two design points distinguish Algorithm~\ref{alg:insert} from the classical procedure of Pagh and Rodler~\cite{pagh2004cuckoo}. First, the outer loop is bounded by $\mathtt{MaxKicks}$, a constant fixed independently of $n$, in place of $\mathtt{MaxLoop} = \lceil 3\log_{1+\varepsilon} r \rceil$, which grows logarithmically with table size~\cite{pagh2004cuckoo}. Second, reaching this bound routes the displaced key to the stash rather than discarding all hash functions and reinserting every key in the table; \textsc{RehashStash} (Algorithm~\ref{alg:rehashstash}) instead reinserts only the $O(s)$ keys currently held in the stash~\cite{kirsch2009stash}.
+	Two design points distinguish Algorithm~\ref{alg:insert} from the
+	classical procedure of Pagh and Rodler~\cite{pagh2004cuckoo}. First, the
+	outer loop is bounded by $\mathtt{MaxKicks}$, a constant fixed
+	independently of $n$, in place of
+	$\mathtt{MaxLoop} = \lceil 3\log_{1+\varepsilon} r \rceil$, which grows
+	logarithmically with table size. Second, reaching this bound routes the
+	displaced key to the stash rather than discarding all hash functions
+	and reinserting every key in the table. \textsc{RehashStash}
+	(Algorithm~\ref{alg:rehashstash}) reinserts only the keys currently
+	held in the stash, \emph{without} redrawing $h_1,\dots,h_d$: a prior
+	version of this routine drew a fresh hash-function tuple on every
+	overflow, which silently broke lookups for every key already resident
+	in the main tables, since their physical slot had been computed under
+	the old functions (see Section~\ref{sec:discussion} for the full
+	account). The corrected version relies only on
+	\textsc{ChooseCandidateIndex}'s randomization for a fresh placement
+	attempt. A small recursion-depth guard (not shown) falls back to a
+	full rehash after a fixed number of failed retries; TBD whether this
+	fallback is ever exercised in practice at the load factors tested in
+	Section~\ref{sec:eval} (\emph{technique}: instrument the guard's trip
+	counter in \texttt{bench.cpp} and report it alongside Table~\ref{tab:comparative_performance}).
 	
 	\section{Theoretical Analysis}
+	\label{sec:theory}
 	
-	This section establishes the formal theoretical foundations of the proposed bounded-displacement $d$-ary cuckoo hash table~\cite{kirsch2009stash}. Specifically, we prove a deterministic worst-case $O(1)$ bound on per-insertion latency (Theorem~\ref{thm:worst_case_latency}), derive a closed-form upper bound on the per-insertion stash-routing probability (Lemma~\ref{lem:stash_routing_prob}), and establish a quantitative bound on the overall stash-overflow probability using multiplicative Chernoff inequalities (Theorem~\ref{thm:stash_overflow_bound}). Together, these results formalize the exact performance trade-offs explored empirically in Section~V.
+	This section establishes: a deterministic worst-case $O(1)$ bound on
+	per-insertion latency (Theorem~\ref{thm:worst_case_latency}), a
+	closed-form upper bound on per-insertion stash-routing probability
+	(Lemma~\ref{lem:stash_routing_prob}), a stash-overflow probability
+	bound via multiplicative Chernoff inequalities
+	(Theorem~\ref{thm:stash_overflow_bound}), and the amortized cost of
+	incremental rehashing (Lemma~\ref{lem:rehash_cost}).
 	
 	\subsection{Worst-Case Insertion Latency}
 	
-	To contrast our architecture with traditional cuckoo hashing implementations, we first revisit the worst-case time complexity of the classical Pagh--Rodler insertion procedure~\cite{pagh2004cuckoo}.
-	
 	\begin{proposition}[Classical Worst-Case Insertion Latency]
-		In the classical cuckoo hashing construction of Pagh and Rodler~\cite{pagh2004cuckoo}, a single call to \textsc{Insert} performs $\Theta(\log n)$ work in the worst case before either succeeding or triggering a full-table rehash.
+		In the classical construction of~\cite{pagh2004cuckoo}, a single call
+		to \textsc{Insert} performs $\Theta(\log n)$ work in the worst case
+		before either succeeding or triggering a full-table rehash.
 	\end{proposition}
-	
 	\begin{proof}
-		In classical 2-way cuckoo hashing, the maximum eviction chain length is governed by the dynamic parameter $\mathtt{MaxLoop} = \lceil 3\log_{1+\varepsilon} r \rceil$, where $r = (1+\varepsilon)n$ represents the total capacity of the main table~\cite{pagh2004cuckoo}. This logarithmic threshold is chosen so that the probability of an insertion sequence encountering an unresolvable cycle or exhausting $\mathtt{MaxLoop}$ is bounded by $O(1/n^2)$ per insertion (Section~2.3 of~\cite{pagh2004cuckoo}). Because $\mathtt{MaxLoop}$ grows logarithmically with the total key set size $n$, the worst-case number of memory probes, hash function evaluations, and key displacements performed during a single insertion scales as $\Theta(\log n)$~\cite{pagh2004cuckoo}.
+		$\mathtt{MaxLoop} = \lceil 3\log_{1+\varepsilon} r \rceil$ is chosen
+		so the probability of exhausting it is $O(n^{-2})$ per insertion
+		(Section~2.3 of~\cite{pagh2004cuckoo}). Because $\mathtt{MaxLoop}$
+		grows logarithmically with $n$, the worst-case work per insertion
+		scales as $\Theta(\log n)$.
 	\end{proof}
-	
-	While a worst-case lookup cost of $O(1)$ makes classical cuckoo hashing attractive for read-heavy workloads, a worst-case insertion complexity of $\Theta(\log n)$---coupled with catastrophic $O(n)$ full-table rebuilds upon loop exhaustion---renders it unsuitable for line-rate exact-match SDN flow tables operating under deterministic per-packet timing constraints~\cite{pagh2004cuckoo}.
 	
 	\begin{theorem}[Worst-Case $O(1)$ Insertion Latency]
 		\label{thm:worst_case_latency}
-		Every call to \textsc{Insert} (Algorithm~2) performs at most $d \cdot \mathtt{MaxKicks} + O(1)$ hash evaluations, cell probes, and key displacements before returning \textsc{Success} or invoking \textsc{RehashStash}. Since the candidate choice count $d$, the stash capacity $s$, and the displacement threshold $\mathtt{MaxKicks}$ are fixed constants independent of the table size $n$, a single call to \textsc{Insert} runs in deterministic $O(1)$ worst-case time, exclusive of the amortized cost of \textsc{RehashStash} itself (analyzed separately in Lemma~\ref{lem:rehash_cost}).
+		Every call to \textsc{Insert} (Algorithm~\ref{alg:insert}) performs
+		at most $d\cdot\mathtt{MaxKicks}+O(1)$ hash evaluations, cell probes,
+		and displacements before returning \textsc{Success} or invoking
+		\textsc{RehashStash}. Since $d$, $s$, and $\mathtt{MaxKicks}$ are
+		fixed constants, a single \textsc{Insert} call runs in deterministic
+		$O(1)$ worst-case time, exclusive of the amortized
+		\textsc{RehashStash} cost (Lemma~\ref{lem:rehash_cost}).
 	\end{theorem}
-	
 	\begin{proof}
-		We bound the execution cost across each individual phase of Algorithm~2:
-		\begin{enumerate}
-			\item \textbf{Duplicate Check \& Membership Probe:} The initial execution of \textsc{Lookup}$(x)$ inspects $d$ candidate sub-table slots $T_1[h_1(x)], \dots, T_d[h_d(x)]$ and $s$ auxiliary stash entries. This incurs exactly $d + s = O(1)$ memory probes and $d$ hash evaluations.
-			\item \textbf{Load Monitoring:} Evaluating the load capacity condition $(n+1)/(dm) > \textsc{LoadThreshold}(d)$ requires a single scalar comparison taking $O(1)$ arithmetic work.
-			\item \textbf{Bounded Displacement Loop:} The outer loop (lines 7--14 of Algorithm~2) executes for at most $\mathtt{MaxKicks}$ iterations. In each round $round \in \{1, \dots, \mathtt{MaxKicks}\}$:
-			\begin{itemize}
-				\item The algorithm checks $d$ candidate cells $T_1[h_1(cur)], \dots, T_d[h_d(cur)]$ for an empty slot ($\bot$). This requires $d$ memory probes and cell comparisons.
-				\item If an empty slot is identified at candidate index $i$, the floating key $cur$ is written to $T_i[h_i(cur)]$, the counter $n$ is incremented, and the algorithm immediately returns \textsc{Success} in $O(1)$ time.
-				\item If all $d$ candidate cells are occupied, selecting a target sub-table index $i \in \{1, \dots, d\}$, evicting the resident key $evicted \leftarrow T_i[h_i(cur)]$, writing $cur$, and updating $cur \leftarrow evicted$ requires $O(1)$ memory writes and swaps.
-			\end{itemize}
-			Thus, the eviction phase contributes at most $\mathtt{MaxKicks} \cdot (d \cdot C_{\text{probe}} + C_{\text{swap}}) = O(d \cdot \mathtt{MaxKicks})$ total operations.
-			\item \textbf{Proactive Stash Placement:} If the loop terminates after $\mathtt{MaxKicks}$ iterations without locating an empty slot, the algorithm inspects the stash. Checking for an open entry in \textsc{Stash} and placing $cur$ requires $O(s) = O(1)$ operations~\cite{kirsch2009stash}.
-		\end{enumerate}
-		
-		Summing the maximum work across all operational steps yields:
-		\begin{equation}
-			\begin{split}
-				T_{\text{insert}}(n) &\le (d + s) + O(1) + \mathtt{MaxKicks} \cdot (d + O(1)) + s \\
-				&= O(d \cdot \mathtt{MaxKicks} + s)
-			\end{split}
-		\end{equation}
-		Because $d$, $\mathtt{MaxKicks}$, and $s$ are structural constants fixed independently of the key set cardinality $n$, $T_{\text{insert}}(n) = O(1)$ deterministically. The single recursive retry on line 19 occurs exclusively upon stash overflow, which is bounded separately in Theorem~\ref{thm:stash_overflow_bound} and occurs with negligible probability $\delta \ll 1/n$.
+		\textsc{Lookup} costs $d+s=O(1)$ probes. The load check is $O(1)$.
+		The eviction loop runs at most $\mathtt{MaxKicks}$ rounds, each
+		costing $O(d)$ probes plus $O(1)$ swap work, for
+		$O(d\cdot\mathtt{MaxKicks})$ total. Stash placement costs $O(s)=O(1)$.
+		Summing: $T_{\text{insert}}(n) \le O(d\cdot\mathtt{MaxKicks}+s)=O(1)$,
+		independent of $n$. The recursive retry (Algorithm~\ref{alg:insert},
+		last line) executes only on stash overflow, bounded separately in
+		Theorem~\ref{thm:stash_overflow_bound}.
 	\end{proof}
-	
-	This result highlights the central architectural trade-off of our design: by capping $\mathtt{MaxKicks}$ as a fixed constant independent of $n$, worst-case per-insertion latency drops from $\Theta(\log n)$ to a strict, bounded $O(1)$ guarantee~\cite{pagh2004cuckoo}. The operational consequence of capping displacement---namely, the non-zero probability that a displacement chain reaches $\mathtt{MaxKicks}$ and routes a key to the stash---is evaluated in the following subsection.
 	
 	\subsection{Stash-Routing Probability and Stash Sizing}
 	
-	While capping eviction chains at $\mathtt{MaxKicks}$ guarantees deterministic $O(1)$ worst-case insertion time, it introduces a non-zero probability that a valid key displacement terminates prematurely before finding an empty slot. This subsection derives the per-insertion stash-routing probability, models cumulative stash utilization, and establishes formal bounds on stash-overflow events~\cite{kirsch2009stash}.
-	
 	\begin{lemma}[Per-Insertion Stash-Routing Probability]
 		\label{lem:stash_routing_prob}
-		Let hash functions $h_1, \dots, h_d$ be drawn from an $(O(1), O(\mathtt{MaxKicks}))$-universal family, and let $r = dm = (1+\varepsilon)n$ for constant $\varepsilon > 0$ (analyzed for $d=2$ base capacity)~\cite{pagh2004cuckoo}. The probability $p(\mathtt{MaxKicks}, \varepsilon)$ that a single key insertion performs $\mathtt{MaxKicks}$ displacements without locating an open slot---thereby routing the key to the stash---satisfies:
+		Let $h_1,\dots,h_d$ be drawn from an $(O(1),O(\mathtt{MaxKicks}))$-universal
+		family, with $r=dm=(1+\varepsilon)n$ (base case $d=2$). The
+		probability that a single insertion performs $\mathtt{MaxKicks}$
+		displacements without locating an open slot satisfies
 		\begin{equation}
-			p(\mathtt{MaxKicks}, \varepsilon) \le 2(1+\varepsilon)^{-\frac{2 \cdot \mathtt{MaxKicks} - 1}{3} + 1} + O(n^{-2})
+			p(\mathtt{MaxKicks},\varepsilon) \le 2(1+\varepsilon)^{-\frac{2\cdot\mathtt{MaxKicks}-1}{3}+1} + O(n^{-2}).
 		\end{equation}
 	\end{lemma}
-	
 	\begin{proof}
-		We adapt the structural graph decomposition of Pagh and Rodler~\cite{pagh2004cuckoo} by evaluating a fixed threshold $t = \mathtt{MaxKicks}$ rather than an $n$-dependent logarithmic parameter $\mathtt{MaxLoop}$.
-		
-		Consider the cuckoo graph $G = (V, E)$ where vertices $V = \{0, \dots, r-1\}$ correspond to table slots and directed edges $E = \{(x, h_1(x) \to h_2(x)) : x \in S\}$ represent stored keys~\cite{pagh2004cuckoo}. An insertion of key $x$ initiates a walk along a path of displaced edges~\cite{pagh2004cuckoo}. Reaching round $t = \mathtt{MaxKicks}$ without finding an unallocated cell requires at least one of three structural subgraph configurations:
-		\begin{enumerate}
-			\item \textbf{Hash Family Non-Independence:} The hash family fails to exhibit $(1, t)$-universality over the active key set $S$~\cite{pagh2004cuckoo}. By construction of the $k$-universal hash family, this event occurs with probability at most $O(n^{-2})$~\cite{pagh2004cuckoo}.
-			\item \textbf{Closed Cycle Traversal:} The sequence of displacements enters a closed simple cycle of length $v \le t$~\cite{pagh2004cuckoo}. Counting cycle subgraphs in $G(V, E)$ under uniform edge placement bounds the probability of encountering a cycle of length $\le t$ by $O(n^{-2})$~\cite{pagh2004cuckoo}.
-			\item \textbf{Long Nestless Path Formation:} The displacement chain traces a path containing $v \ge (2t-1)/3$ distinct non-repeated ``nestless'' keys originating from $x$~\cite{pagh2004cuckoo}. The number of distinct simple paths of length $v$ starting at $h_1(x)$ is bounded by counting valid edge permutations~\cite{pagh2004cuckoo}. The probability of such a sequence existing in $G$ is bounded above by:
-			\begin{equation}
-				\Pr[\text{Path Length} \ge v] \le 2 \left(\frac{n}{r}\right)^{v-1} \le 2 \left(\frac{1}{1+\varepsilon}\right)^{v-1}
-			\end{equation}
-		\end{enumerate}
-		Substituting $v = \frac{2 \cdot \mathtt{MaxKicks} - 1}{3}$ into the geometric path bound and adding the lower-order $O(n^{-2})$ terms yields the result~\cite{pagh2004cuckoo}.
+		Adapting the three-case decomposition of~\cite{pagh2004cuckoo}
+		(hash-family non-independence, closed-cycle traversal, long
+		nestless-path formation) at a fixed threshold $t=\mathtt{MaxKicks}$
+		in place of the growing $\mathtt{MaxLoop}$: the first two cases are
+		each $O(n^{-2})$; the third is bounded by
+		$2(1+\varepsilon)^{-(2t-1)/3+1}$ via the path-counting argument of
+		\cite{pagh2004cuckoo}. Summing gives the result.
 	\end{proof}
 	
-	In classical cuckoo hashing, setting $t = \mathtt{MaxLoop} = \lceil 3 \log_{1+\varepsilon} r \rceil$ forces the path bound $2(1+\varepsilon)^{-(2t-1)/3 + 1}$ down to $O(n^{-2})$, guaranteeing that stashing is almost never required~\cite{pagh2004cuckoo}. Conversely, fixing $t = \mathtt{MaxKicks}$ as a constant leaves this term non-vanishing: $p(\mathtt{MaxKicks}, \varepsilon)$ decays exponentially with $\mathtt{MaxKicks}$ but remains strictly independent of $n$. This constant routing rate represents the fundamental trade-off required to guarantee $O(1)$ worst-case insertion timing.
+	Fixing $t=\mathtt{MaxKicks}$ as a constant -- rather than letting it
+	grow as $\mathtt{MaxLoop}$ does -- leaves the dominant term
+	non-vanishing: it decays exponentially in $\mathtt{MaxKicks}$ but not
+	in $n$. This is the price of the $O(1)$ guarantee in
+	Theorem~\ref{thm:worst_case_latency}.
 	
-	\begin{corollary}[Expected Stash Occupancy]
+	\begin{corollary}[Expected Stash Load]
 		\label{cor:expected_stash_load}
-		Across $n$ sequential insertions into an un-resized table, the expected total number of keys routed to the stash is given by:
-		\begin{equation}
-			\begin{split}
-				\mu &= \mathbb{E}[|S_{\text{stash}}|] = n \cdot p(\mathtt{MaxKicks}, \varepsilon) \\
-				&= \Theta(n) \cdot 2(1+\varepsilon)^{-\frac{2 \cdot \mathtt{MaxKicks} - 1}{3} + 1}
-			\end{split}
-		\end{equation}
-		treating lower-order $O(n^{-2})$ terms as negligible for $n \ge 10^4$.
+		Over $n$ insertions into an un-resized table,
+		$\mu = \mathbb{E}[|S_{\text{stash}}|] = n\cdot p(\mathtt{MaxKicks},\varepsilon)$,
+		treating the $O(n^{-2})$ term as negligible.
 	\end{corollary}
 	
 	\begin{theorem}[Stash-Overflow Probability Bound]
 		\label{thm:stash_overflow_bound}
-		Model the stash-routing events of $n$ inserted keys as independent Bernoulli trials $X_1, \dots, X_n \sim \text{Bernoulli}(p)$, where $p = p(\mathtt{MaxKicks}, \varepsilon)$~\cite{kirsch2009stash}. The total stash load $X = \sum_{i=1}^n X_i$ follows a Binomial distribution $\text{Binomial}(n, p)$ with mean $\mu = np$~\cite{kirsch2009stash}. For any fixed stash capacity $s > \mu$, the probability that the stash overflows ($X > s$) is strictly bounded by the multiplicative Chernoff bound:
+		Modeling stash-routing events as i.i.d.\ $\text{Bernoulli}(p)$
+		trials (the same independence approximation used
+		in~\cite{kirsch2009stash,xiong2025tecache}; its own accuracy against
+		the correlated dynamics of this scheme specifically is TBD --
+		\emph{technique}: compare the predicted $\mu$ below against the
+		measured \texttt{stashRoutedCount} in \texttt{bench.cpp} across the
+		Table~\ref{tab:sensitivity_analysis} sweep), with
+		$X=\sum_{i=1}^n X_i \sim \text{Binomial}(n,p)$, $\mu=np$: for stash
+		capacity $s>\mu$,
 		\begin{equation}
-			\Pr[X > s] \le \left( \frac{e \cdot \mu}{s} \right)^s e^{-\mu}
+			\Pr[X>s] \le \left(\frac{e\mu}{s}\right)^s e^{-\mu}.
 		\end{equation}
 	\end{theorem}
-	
 	\begin{proof}
-		Applying the standard upper-tail multiplicative Chernoff bound $\Pr[X > (1+\delta)\mu] < \left( \frac{e^\delta}{(1+\delta)^{1+\delta}} \right)^\mu$ for $1+\delta = \frac{s}{\mu} > 1$:
-		\begin{align}
-			\Pr[X > s] &\le \left( \frac{e^{s/\mu - 1}}{(s/\mu)^{s/\mu}} \right)^\mu = \frac{e^{s - \mu}}{\left( \frac{s}{\mu} \right)^s} = \left( \frac{e \mu}{s} \right)^s e^{-\mu}
-		\end{align}
-		This completes the proof.
+		Standard multiplicative Chernoff bound with $1+\delta=s/\mu$.
 	\end{proof}
 	
-	\begin{corollary}[Worked Theoretical Sizing Example]
+	\begin{corollary}[Illustrative Sizing Example -- $d=2$ Base Case]
 		\label{cor:worked_example}
-		Consider a 2-way table ($d=2$) operating at $50\%$ load factor ($\varepsilon = 1.0, r = 2n$) containing $n = 10^5$ keys, equipped with a stash of capacity $s = 4$ entries~\cite{kirsch2009stash}.
-		\begin{itemize}
-			\item \textbf{Case 1 ($\mathtt{MaxKicks} = 24$):}
-			\begin{equation}
-				p(24, 1) \le 2 \cdot 2^{-\frac{48-1}{3} + 1} = 2 \cdot 2^{-14.67} \approx 7.63 \times 10^{-5}
-			\end{equation}
-			The expected stash load is $\mu = 10^5 \times (7.63 \times 10^{-5}) \approx 7.63$. Because $\mu > s = 4$, the upper-tail condition $1+\delta > 1$ is violated, and a stash size of $s=4$ is insufficient to prevent frequent overflows.
-			
-			\item \textbf{Case 2 ($\mathtt{MaxKicks} = 32$):}
-			\begin{equation}
-				p(32, 1) \le 2 \cdot 2^{-\frac{64-1}{3} + 1} = 2 \cdot 2^{-20.0} \approx 1.91 \times 10^{-6}
-			\end{equation}
-			The expected stash load drops to $\mu = 10^5 \times (1.91 \times 10^{-6}) \approx 0.191$. Evaluating Theorem~\ref{thm:stash_overflow_bound} with $s=4$ and $\mu=0.191$:
-			\begin{equation}
-				\begin{aligned}
-					\Pr[X > 4] &\le \left( \frac{e \cdot 0.191}{4} \right)^4 e^{-0.191} \\
-					&= (0.1298)^4 \times 0.826 \approx 2.35 \times 10^{-4}
-				\end{aligned}
-			\end{equation}
-		\end{itemize}
-		When extended to $d=3$ candidate choices, the sharp threshold results of Fountoulakis and Panagiotou~\cite{fountoulakis2012sharp} guarantee that the cuckoo hypergraph remains sparse at load factors up to $\alpha \le 0.917$. This structural sparsity reduces $p(\mathtt{MaxKicks}, \varepsilon)$ exponentially faster, allowing $\mathtt{MaxKicks}$ to be set as low as $12\text{--}16$ while keeping $\Pr[X > 4] < 10^{-6}$.
+		For $d=2$, $\varepsilon=1.0$ ($\alpha=0.5$), $n=10^5$, $s=4$:
+		at $\mathtt{MaxKicks}=24$, $p\approx 7.6\times10^{-5}$ gives
+		$\mu\approx 7.6 > s$ (stash undersized); at $\mathtt{MaxKicks}=32$,
+		$p\approx 1.9\times10^{-6}$ gives $\mu\approx 0.19$ and
+		$\Pr[X>4]\lesssim 2.4\times10^{-4}$. This is a conservative,
+		moderate-load ($\alpha=0.5$) toy case chosen for closed-form
+		tractability, \emph{not} a sizing recommendation for the scheme's
+		actual target regime. Section~\ref{sec:eval}D reports measured
+		routing probabilities at $d=3$, $\alpha\approx0.86$--$0.87$ (close
+		to the $\approx 0.917$ ceiling for $d=3$~\cite{fountoulakis2012sharp})
+		that are several orders of magnitude higher than this example
+		suggests -- consistent in direction with
+		Lemma~\ref{lem:stash_routing_prob}'s $\varepsilon$-dependence, but a
+		reminder that $d=2,\alpha=0.5$ figures do not transfer directly to
+		the near-ceiling, higher-$d$ operating points this paper targets.
 	\end{corollary}
 	
 	\subsection{Amortized Cost of Incremental Rehashing}
 	
-	When a stash overflow occurs ($|S_{\text{stash}}| > s$), Algorithm~3 executes \textsc{RehashStash} rather than rebuilding the entire table.
-	
 	\begin{lemma}[Incremental Rehash Cost]
 		\label{lem:rehash_cost}
-		A single execution of \textsc{RehashStash} (Algorithm~3) performs exactly $s$ calls to \textsc{Insert} under fresh hash functions $h_1', \dots, h_d'$. The worst-case operational cost of \textsc{RehashStash} is $O(s \cdot d \cdot \mathtt{MaxKicks}) = O(1)$ deterministic time---compared to $\Theta(n)$ for classical full-table rehashing~\cite{pagh2004cuckoo}.
+		A single \textsc{RehashStash} (Algorithm~\ref{alg:rehashstash})
+		call performs at most $s$ calls to \textsc{Insert} under the
+		\emph{unchanged} $h_1,\dots,h_d$ (see G2 and
+		Section~\ref{sec:discussion}). Its worst-case cost is
+		$O(s\cdot d\cdot\mathtt{MaxKicks})=O(1)$, versus $\Theta(n)$ for
+		classical full-table rehashing.
 	\end{lemma}
-	
 	\begin{proof}
-		\textsc{RehashStash} extracts all $s$ keys from the overflowed stash, resets \textsc{Stash} to empty, and sequentially invokes \textsc{Insert}$(k)$ for each extracted key $k \in S_{\text{stash}}$. By Theorem~\ref{thm:worst_case_latency}, each individual insertion executes at most $d \cdot \mathtt{MaxKicks} + O(1)$ steps. Summing across all $s$ stashed entries yields a total processing cost of $s \cdot (d \cdot \mathtt{MaxKicks} + O(1))$. Because $s$, $d$, and $\mathtt{MaxKicks}$ are fixed constants independent of $n$, the overall rehash procedure runs in $O(1)$ time.
+		\textsc{RehashStash} extracts at most $s$ keys and reinserts each
+		via Algorithm~\ref{alg:insert}, each costing $O(1)$ by
+		Theorem~\ref{thm:worst_case_latency}. Total: $O(s)$, constant in
+		$n$.
 	\end{proof}
 	
-	\begin{corollary}[Amortized Per-Insertion Time Complexity]
-		Across any sequence of $N_{\text{ops}}$ insertion and deletion operations, the total computational work performed by the data structure is:
-		\begin{equation}
-			T_{\text{total}} = N_{\text{ops}} \cdot O(1) + N_{\text{overflow}} \cdot O(s)
-		\end{equation}
-		where $N_{\text{overflow}}$ is the total number of stash-overflow events. By Theorem~\ref{thm:stash_overflow_bound}, sizing $s$ such that $\Pr[X > s] = \delta \ll 1/n$ guarantees that $\mathbb{E}[N_{\text{overflow}}] \ll 1$ over $N_{\text{ops}} = n$ insertions. Thus, the expected amortized insertion cost is $O(1)$ time per operation, with a deterministic $O(1)$ worst-case bound for every individual operation that does not trigger a rehash.
+	\begin{corollary}[Amortized Per-Insertion Cost]
+		\label{cor:amortized}
+		Over $N_{\text{ops}}$ operations,
+		$T_{\text{total}} = N_{\text{ops}}\cdot O(1) + N_{\text{overflow}}\cdot O(s)$.
+		Whether $\mathbb{E}[N_{\text{overflow}}]$ stays small depends on how
+		far the operating load factor sits below the $d$-ary ceiling: it is
+		small at the conservative parameters of
+		Corollary~\ref{cor:worked_example}, but Section~\ref{sec:eval}D
+		reports a measured overflow rate that is \emph{not} negligible
+		(order $10^{-2}$ per insertion) at $d=3$, $\alpha\approx0.887$,
+		$\mathtt{MaxKicks}=16$, $s=4$ -- each individual overflow still costs
+		only $O(s)=O(1)$, so the per-event bound holds regardless, but the
+		earlier claim that overflow events are rare \emph{by construction}
+		does not hold uniformly across the parameter space and must be
+		checked for the chosen operating point (see
+		Section~\ref{sec:discussion}).
 	\end{corollary}
 	
 	\subsection{Graph Orientability, Hypergraph Cores, and Stash Optimality}
 	
-	To analyze $d$-ary placement behavior, we model table occupancy using $d$-uniform cuckoo hypergraphs $G(n, \varepsilon, d, s) = (V, E)$~\cite{minaud2023generalized}. The vertex set $V = \{0, \dots, m-1\}$ represents sub-table slots across $d$ sub-tables, and each inserted key $x \in S$ defines a hyperedge $e_x = (h_1(x), h_2(x), \dots, h_d(x)) \in E$~\cite{minaud2023generalized}.
-	
-	\begin{definition}[Hypergraph Suitability and Orientability]
-		A cuckoo hypergraph $G = (V, E)$ is $s$-suitable if there exists a subset of edges $E_{\text{stash}} \subseteq E$ with $|E_{\text{stash}}| \le s$ such that the remaining hypergraph $G' = (V, E \setminus E_{\text{stash}})$ can be oriented with maximum vertex out-degree $\le 1$ (i.e., every key in $E \setminus E_{\text{stash}}$ is assigned to a unique candidate sub-table slot)~\cite{minaud2023generalized}.
-	\end{definition}
-	
-	By Hakimi's orientation generalization and Hall's Marriage Theorem, $G$ is $s$-suitable if and only if every subset of hyperedges $Y \subseteq E$ satisfies~\cite{minaud2023generalized}:
-	\begin{equation}
-		|\Gamma(Y)| + s \ge |Y|
-	\end{equation}
-	where $\Gamma(Y) = \bigcup_{e \in Y} e$ denotes the set of endpoint vertices spanned by hyperedges $Y$~\cite{minaud2023generalized}.
-	
-	Minaud and Papamanthou~\cite{minaud2023generalized} established that an augmenting-path search (such as breadth-first search over displacement paths) identifies a valid orientable subgraph that minimizes the required stash size $s_{\text{opt}}$. They corrected the original failure bound derived by Kirsch et al.~\cite{kirsch2009stash}, demonstrating that for multi-item or $d$-ary bucket structures, the asymptotic failure probability is $\Theta(n^{-d-s})$ rather than $\Theta(n^{-(s+1)(d-1)})$~\cite{kirsch2009stash, minaud2023generalized}. By setting $\mathtt{MaxKicks}$ sufficiently large relative to the local hypergraph diameter, our bounded-displacement insertion algorithm effectively computes augmenting paths up to depth $\mathtt{MaxKicks}$, routing keys to the stash only when the local hypergraph core density exceeds sub-table capacity~\cite{minaud2023generalized}.
+	Table occupancy can be modeled as a $d$-uniform cuckoo hypergraph
+	$G(n,\varepsilon,d,s)=(V,E)$~\cite{minaud2023generalized}, with each key
+	$x\in S$ a hyperedge $e_x=(h_1(x),\dots,h_d(x))$. $G$ is $s$-suitable if
+	some $E_{\text{stash}}\subseteq E$, $|E_{\text{stash}}|\le s$, leaves
+	$G'=(V,E\setminus E_{\text{stash}})$ orientable with max out-degree
+	$\le 1$. By Hakimi's theorem, this holds iff every $Y\subseteq E$
+	satisfies $|\Gamma(Y)|+s\ge|Y|$~\cite{minaud2023generalized}. Minaud and
+	Papamanthou corrected Kirsch et al.'s original multi-item-bucket bound,
+	establishing $\Pr[\text{failure}]=\Theta(n^{-d-s})$ rather than the
+	originally claimed $\Theta(n^{-(s+1)(d-1)})$~\cite{kirsch2009stash,minaud2023generalized}.
+	Our bounded-displacement \textsc{Insert} can be read as computing
+	augmenting paths up to depth $\mathtt{MaxKicks}$ only, routing to the
+	stash whenever the local hypergraph core's true augmenting-path depth
+	exceeds that bound -- which is precisely why
+	Corollary~\ref{cor:worked_example}'s conservative example understates
+	routing probability near the structural ceiling: local core density,
+	not just global $\alpha$, governs how often depth-$\mathtt{MaxKicks}$
+	search is insufficient.
 	
 	\section{System Feasibility and Implementation Architecture}
-	
-	Implementing an exact-match flow table with bounded displacement requires balancing memory access latencies, bank access parallelism, and CPU cache topology across both custom hardware (ASICs and FPGAs) and software-defined packet processing engines (such as DPDK). This section details the structural memory hierarchy, hash family mechanics, and execution hardware pipelines necessary to sustain line-rate performance under deterministic timing constraints. Fig.~\ref{fig:hwsw} summarizes the hardware and software memory layouts described below.
+	\label{sec:feasibility}
 	
 	\begin{figure}[t]
 		\centering
@@ -438,7 +497,6 @@
 			lane/.style={font=\footnotesize\bfseries, anchor=west},
 			cell/.style={draw=black!70, minimum height=0.55cm, align=center, inner sep=1pt, font=\footnotesize}
 			]
-			% ---- (a) hardware ----
 			\node[lane] at (0,0) {(a) ASIC/FPGA: parallel probe in one cycle};
 			\node[bank] (t1) at (0.5\columnwidth,-0.85) {Bank $T_1[h_1(x)]$};
 			\node[bank] (t2) at (0.5\columnwidth,-1.6) {Bank $T_2[h_2(x)]$};
@@ -448,7 +506,6 @@
 			\node[io] (in)  at (0.085\columnwidth,-2.1) {Flow\\key $x$};
 			\node[io] (out) at (0.915\columnwidth,-2.1) {Hit or\\miss};
 			\foreach \n in {t1,t2,td,st} {\draw[ar] (in.east) -- (\n.west); \draw[ar] (\n.east) -- (out.west);}
-			% ---- (b) software ----
 			\node[lane] at (0,-4.25) {(b) DPDK/x86: cacheline-aligned layout};
 			\node[font=\footnotesize, anchor=west] at (0,-4.8) {Candidate slots, one 64-byte cacheline};
 			\foreach \i/\l in {0/{$T_1$},1/{$T_2$},2/{$T_3$},3/{$\cdots$},4/{$T_d$}} {
@@ -459,137 +516,222 @@
 				\node[cell, minimum width=0.2375\columnwidth, fill=blue!12, draw=blue!55!black] at ({0.11875\columnwidth+\i*0.2375\columnwidth},-6.6) {key \i};
 			}
 		\end{tikzpicture}
-		\caption{Memory layout of the proposed flow table. (a) Hardware: each sub-table lives in its own memory bank and the stash sits beside them, so all $d+1$ lookups run in parallel. (b) Software: candidate slots share a cacheline and the small stash is scanned with one vector comparison.}
+		\caption{Proposed memory layout (design, not yet synthesized/profiled -- see TBD items below). (a) Hardware: one bank per sub-table plus stash, probed in parallel. (b) Software: candidate slots share a cacheline; stash is one small vector compare.}
 		\label{fig:hwsw}
 	\end{figure}
 	
-	\subsection{Memory Hierarchy and Hardware/Software Co-Design}
+	This section describes a \emph{proposed} hardware/software layout; none
+	of the figures below are measured, and are marked TBD accordingly.
 	
-	\subsubsection{Hardware Pipeline Plane (ASIC / FPGA)}
-	In high-performance ASIC and FPGA data planes, the primary architectural bottleneck is memory bank contention. To support single-cycle lookups and insertions, sub-tables $T_1, \dots, T_d$ are partitioned into $d$ physically independent Block RAM (BRAM) or UltraRAM (URAM) memory banks, adapting the Parallel $d$-Pipeline layout~\cite{pontarelli2016parallel}.
-	\begin{itemize}
-		\item \textbf{Parallel Sub-Table Probing:} Evaluating candidate slots $T_1[h_1(x)], \dots, T_d[h_d(x)]$ executes concurrently in a single pipeline clock cycle across $d$ dual-port SRAM banks.
-		\item \textbf{Register-Based Auxiliary Stash:} The stash $\text{Stash}$ is realized as a parallel Content-Addressable Memory (CAM) or register array situated directly adjacent to the memory access controller. Sizing $s = 4$ entries requires four $128$-bit key registers and match logic, incurring $< 0.01\%$ area overhead on modern FPGAs while enabling single-cycle concurrent stash queries.
-		\item \textbf{Displacement Controller Logic:} Key evictions and candidate swaps are executed by an asynchronous state machine. Capping the displacement sequence at $\mathtt{MaxKicks} \le 24$ guarantees that worst-case eviction handling completes within a deterministic clock budget before queuing delays propagate back through ingress packet buffers.
-	\end{itemize}
+	\subsubsection{Hardware Pipeline Plane (ASIC/FPGA)}
+	Adapting the Parallel $d$-Pipeline layout~\cite{pontarelli2016parallel},
+	sub-tables $T_1,\dots,T_d$ would map to $d$ physically independent
+	BRAM/URAM banks probed in one cycle, with the stash as a small
+	register/CAM block beside the memory controller. Area overhead of a
+	4-entry (512-bit) stash: TBD (\emph{technique}: FPGA synthesis and
+	post-place-and-route area report on a target device; expected small
+	given its size relative to the main table banks, but not measured).
+	Whether $\mathtt{MaxKicks}\le 24$ fits a specific target clock budget:
+	TBD (\emph{technique}: RTL implementation of the displacement
+	controller plus timing closure report).
 	
-	\subsubsection{Software Packet Processing Plane (Intel Xeon / DPDK)}
-	In software data planes operating on commodity x86 servers via DPDK, memory probe overhead is dominated by CPU cache misses and cache line alignment bounds~\cite{lescouarnec2018cuckoopp}. To maximize CPU L1/L2 cache locality:
-	\begin{itemize}
-		\item \textbf{Cacheline Alignment:} Candidate slots $T_1[h_1(x)], \dots, T_d[h_d(x)]$ are packed into contiguous $64$-byte cachelines, matching Cuckoo++ design principles~\cite{lescouarnec2018cuckoopp}.
-		\item \textbf{SIMD Vectorized Stash Searching:} The stash array is aligned to $32$-byte or $64$-byte boundaries, allowing 256-bit AVX2 or 512-bit AVX-512 vector instructions to compare key $x$ against all $s=4$ stashed entries in a single SIMD execution pass.
-		\item \textbf{Software Prefetching:} During key eviction walks, prefetch hints (\texttt{\_mm\_prefetch}) load candidate alternate target slots into L1 cache prior to array writeback, mitigating DRAM pipeline stalls.
-	\end{itemize}
+	\subsubsection{Software Packet Processing Plane (DPDK-style)}
+	Candidate slots would pack into one 64-byte cacheline per bucket,
+	following Cuckoo++'s layout principles~\cite{lescouarnec2018cuckoopp};
+	the stash would be compared via one vector instruction against its
+	$s=4$ entries. Realized throughput under this layout: TBD
+	(\emph{technique}: port \texttt{bench.cpp}'s logic into an explicit
+	cacheline-aligned/SIMD layout and re-measure, rather than the
+	plain-array layout used for Section~\ref{sec:eval}'s numbers).
 	
-	\section{Empirical Evaluation and Comparative Analysis}
-	
-	To validate the theoretical guarantees established in Section~III, we conduct empirical evaluations across synthetic microflow benchmarks and real-world backbone traffic traces from CAIDA data centers. Performance is benchmarked against three baseline dictionary architectures:
-	\begin{enumerate}
-		\item \textbf{Linear Probing (Open Addressing):} Standard linear probing with load factor limit $\alpha = 0.70$.
-		\item \textbf{Classical 2-Way Cuckoo Hashing:} Pagh--Rodler construction ($d=2$) without stash, $\mathtt{MaxLoop} = \lceil 3\log_{1.1} n \rceil$.
-		\item \textbf{Chained Hashing:} Linked-list collision resolution.
-	\end{enumerate}
+	\section{Empirical Evaluation}
+	\label{sec:eval}
 	
 	\subsection{Evaluation Methodology \& Benchmark Setup}
-	All algorithms were implemented in C++20 compiled with GCC 12.2 (\texttt{-O3 -march=native}) and benchmarked on an Intel Xeon Platinum 8380 CPU ($2.30\text{~GHz}$, $48\text{~MB}$ L3 Cache) with 128\,GB DDR4 memory. Traces consisted of $10^7$ synthetic random 5-tuples and real CAIDA equinix-nyc backbone packet traces. Hash functions $h_1, \dots, h_d$ were realized using 64-bit MurmurHash3 and AES-NI hardware-accelerated universal hashing.
+	All four schemes below (linear probing, chained hashing, classical
+	2-way cuckoo hashing~\cite{pagh2004cuckoo}, and the proposed scheme)
+	were implemented in C++17 (\texttt{g++ -O2}) and run on a single-vCPU
+	virtualized x86-64 instance (KVM hypervisor; exact host silicon model
+	TBD). Keys are $N=2{,}000{,}000$ synthetic, distinct, uniformly random
+	64-bit values (\texttt{std::mt19937\_64}, fixed seed), standing in for
+	flow identifiers; this is \emph{not} a real traffic trace. $N=10^7$,
+	real backbone traces (e.g.\ CAIDA), and dedicated non-virtualized
+	hardware are TBD (\emph{technique}: extend \texttt{bench.cpp}'s $N$
+	parameter and re-run; obtain a licensed/public anonymized trace and
+	replay it as the insertion/lookup sequence; repeat on bare-metal with
+	pinned frequency and isolated cores).
+	
+	\subsubsection{Comparison Fairness}
+	\begin{itemize}
+		\item Identical key set and seed across all four schemes.
+		\item Each scheme sized to its own realistic target load: linear
+		probing $\alpha=0.70$; chained hashing $\alpha=1.00$; classical
+		cuckoo $\alpha\in\{0.33, 0.49, 0.495\}$ (Pagh--Rodler's own
+		recommended point, and two points near the $d=2$ ceiling); proposed
+		scheme $\alpha\approx 0.887$ (near the $d=3$ ceiling).
+		\item Same compiler, flags, process, and host for all runs.
+		\item TBD: multi-seed replication with confidence intervals
+		(\emph{technique}: repeat each configuration $\ge\!10\times$ with
+		distinct seeds; currently single-seed per configuration).
+	\end{itemize}
 	
 	\subsection{Comparative Microbenchmarks}
-	Table~\ref{tab:comparative_performance} presents microbenchmark results comparing dictionary capacity, tail latency, lookup probe counts, and total rehash frequency across $10^7$ operations at peak load factor $\alpha = 0.90$.
+	Table~\ref{tab:comparative_performance} reports measured results at
+	$N=2\times10^6$ insertions. ``Cuckoo Cache''~\cite{pontarelli2016cuckoocache}
+	and ``TECache''~\cite{xiong2025tecache} baselines are TBD
+	(\emph{technique}: implement their respective placement policies --
+	frequency-biased table ordering, and FelisCatus adjacent-hopping with
+	co-directional kicking, respectively -- against the same harness and
+	key set).
 	
 	\begin{table*}[t]
-		\caption{Comparative Performance Microbenchmarks ($10^7$ Flow Updates, Table Capacity $n = 10^6$ Keys)}
+		\caption{Comparative Microbenchmarks, Measured ($N=2\times10^6$ Insertions, Single-vCPU KVM Host)}
 		\label{tab:comparative_performance}
 		\centering
 		\resizebox{\linewidth}{!}{%
-			\begin{tabular}{|l|c|c|c|c|c|c|}
+			\begin{tabular}{|l|c|c|c|c|c|c|c|}
 				\hline
-				\textbf{Scheme} & \textbf{Choices ($d$)} & \textbf{Max Load ($\alpha$)} & \textbf{Avg Lookup Probes} & \textbf{99.9th\% Insert Latency} & \textbf{Max Insert Probes} & \textbf{Full Rehashes} \\ \hline
-				Linear Probing & N/A & 70.0\% & 1.84 & 24.2 $\mu\text{s}$ & 142 & 0 (Resize) \\ \hline
-				Chained Hashing & N/A & 100.0\% & 1.45 & 8.6 $\mu\text{s}$ & 18 & 0 (Alloc) \\ \hline
-				Classical Cuckoo~\cite{pagh2004cuckoo} & $d=2$ & 49.5\% & 1.50 & 14.2 $\mu\text{s}$ & 118 ($\mathtt{MaxLoop}$) & 14 \\ \hline
-				Cuckoo Cache~\cite{pontarelli2016cuckoocache} & $d=2$ & 82.0\% & 1.12 & 18.5 $\mu\text{s}$ & 96 & 6 \\ \hline
-				\textbf{Proposed Bounded ($s=4$)} & $d=3$ & \textbf{92.0\%} & \textbf{1.28} & \textbf{0.032 $\mu\text{s}$} & \textbf{16 ($\mathtt{MaxKicks}$)} & \textbf{0} \\ \hline
+				\textbf{Scheme} & \textbf{$d$} & \textbf{Load $\alpha$} & \textbf{Avg Lookup Probes} & \textbf{Insert p50/p99/p999} & \textbf{Insert Max} & \textbf{Max Kicks/Probes} & \textbf{Full Rehashes} \\ \hline
+				Linear Probing & N/A & 0.700 & 2.165 & 88/374/481 ns & 129.2 $\mu$s & 122 & 0 \\ \hline
+				Chained Hashing & N/A & 1.000 & 1.500 & 204/588/958 ns & 112.8 $\mu$s & 10 & 0 \\ \hline
+				Classical Cuckoo~\cite{pagh2004cuckoo} & 2 & 0.495 & 1.365 & 111/1200/3184 ns & 20.047 s & 129 (cap 66$\times$2) & 382 \\ \hline
+				Classical Cuckoo (typical load) & 2 & 0.330 & -- & -- & -- & 27 & 0 \\ \hline
+				\textbf{Proposed} & 3 & 0.887 & 1.978 & 144/4668/7426 ns & 2.013 ms & 16 (hard cap) & \textbf{0} \\ \hline
 			\end{tabular}%
 		}
 	\end{table*}
 	
-	As shown in Table~\ref{tab:comparative_performance}, classical cuckoo hashing suffers from high tail latency ($14.2\,\mu\text{s}$ at 99.9th percentile) due to long eviction walks and experiences 14 full-table rehashes. In contrast, the proposed bounded scheme with $d=3$ and $\mathtt{MaxKicks} = 16$ caps maximum insertion probes at exactly 16, delivering a $443\times$ reduction in 99.9th percentile insertion tail latency ($0.032\,\mu\text{s}$) with zero full-table rehashes.
+	Classical cuckoo hashing at $\alpha=0.330$ (Pagh and Rodler's own
+	recommended operating point) shows zero full rehashes over
+	$2\times10^6$ insertions, consistent with
+	Eq.~\ref{eq:baseline-rehash-prob}. Pushed to $\alpha=0.495$, near its
+	$d=2$ structural ceiling, it incurs 382 full rehashes, several of
+	which cascade expensively -- see Section~\ref{sec:eval}C. The proposed
+	scheme, run much closer to \emph{its own} ceiling
+	($\alpha=0.887$ vs.\ a $d=3$ threshold of $\approx0.917$), triggers
+	zero full-table rehashes by construction (Algorithm~\ref{alg:rehashstash}
+	never performs one in this run), at the cost of a non-trivial
+	incremental-rehash rate -- quantified in Section~\ref{sec:eval}D.
 	
-	\subsection{Sensitivity Analysis: Displacement Bound vs. Stash Utilization}
-	To validate Corollary~\ref{cor:worked_example}, Table~\ref{tab:sensitivity_analysis} evaluates the impact of varying the displacement threshold $\mathtt{MaxKicks}$ on stash routing probability $p(\mathtt{MaxKicks}, \varepsilon)$, average stash utilization, and incremental rehash frequency at load factor $\alpha = 0.88$.
+	\subsection{Tail Latency}
+	The two cuckoo-based schemes above were deliberately run near their
+	\emph{own} respective structural ceilings. The resulting worst-case
+	insertion latencies differ by roughly four orders of magnitude:
+	$20.047\,\text{s}$ (classical, one cascading full rehash) versus
+	$2.013\,\text{ms}$ (proposed, bounded by $\mathtt{MaxKicks}$ and
+	incremental rehashing) -- a ratio of $\approx\!9{,}960\times$. This is
+	the paper's central empirical claim and it holds. The $p_{999}$
+	comparison is more nuanced and is reported honestly rather than
+	omitted: at these specific (different, each-near-its-own-ceiling)
+	operating points, the proposed scheme's $p_{999}$ ($7{,}426\,$ns) is
+	\emph{higher} than classical cuckoo's $p_{999}$ ($3{,}184\,$ns) --
+	because the proposed scheme is being pushed much closer to its own
+	load limit. The win claimed by this paper is specifically in the
+	\emph{bounded worst case}, not in steady-state tail latency at
+	mismatched loads; a same-$\alpha$ comparison between the two schemes
+	is TBD (\emph{technique}: re-run both at a shared, conservative
+	$\alpha$ common to both structural ceilings, e.g.\ $\alpha\approx0.45$).
+	
+	\subsection{Sensitivity Analysis: $\mathtt{MaxKicks}$ vs.\ Stash Pressure}
+	Table~\ref{tab:sensitivity_analysis} reports measured routing
+	probability, stash overflow count, and the deepest kick-chain observed
+	before routing, for $d=3$, target $\alpha\approx0.86$--$0.87$, $s=4$,
+	sweeping $\mathtt{MaxKicks}$.
 	
 	\begin{table}[htbp]
-		\caption{Sensitivity Analysis: $\mathtt{MaxKicks}$ Threshold vs. Stash Occupancy ($d=3, \alpha = 0.88, s=4$)}
+		\caption{$\mathtt{MaxKicks}$ Sensitivity, Measured ($d{=}3$, $\alpha\!\approx\!0.86$--$0.87$, $s{=}4$, $N{=}2\times10^6$)}
 		\label{tab:sensitivity_analysis}
 		\centering
 		\resizebox{\columnwidth}{!}{%
 			\begin{tabular}{|c|c|c|c|c|}
 				\hline
-				\textbf{$\mathtt{MaxKicks}$} & \textbf{Routing Prob $p$} & \textbf{Avg Stash Occupancy} & \textbf{Stash Overflows} & \textbf{Max Insert Probes} \\ \hline
-				4 & $4.12 \times 10^{-2}$ & 3.88 & 142 & 4 \\ \hline
-				8 & $2.84 \times 10^{-3}$ & 2.14 & 12 & 8 \\ \hline
-				12 & $1.15 \times 10^{-4}$ & 0.42 & 0 & 12 \\ \hline
-				\textbf{16} & $\mathbf{4.20 \times 10^{-6}}$ & \textbf{0.08} & \textbf{0} & \textbf{16} \\ \hline
-				24 & $1.08 \times 10^{-8}$ & 0.01 & 0 & 24 \\ \hline
+				\textbf{$\mathtt{MaxKicks}$} & \textbf{Routing Prob $p$} & \textbf{Stash Overflows} & \textbf{Deepest Chain} & \textbf{Load $\alpha$} \\ \hline
+				4  & $1.31\times10^{-1}$ & 65{,}702 & 3  & 0.857 \\ \hline
+				8  & $7.31\times10^{-2}$ & 36{,}559 & 7  & 0.865 \\ \hline
+				12 & $5.01\times10^{-2}$ & 25{,}044 & 11 & 0.870 \\ \hline
+				16 & $3.80\times10^{-2}$ & 19{,}001 & 15 & 0.872 \\ \hline
+				24 & $2.39\times10^{-2}$ & 11{,}943 & 23 & 0.875 \\ \hline
 			\end{tabular}%
 		}
 	\end{table}
 	
-	The empirical results in Table~\ref{tab:sensitivity_analysis} closely align with theoretical predictions: setting $\mathtt{MaxKicks} \ge 16$ drops stash routing probability below $10^{-5}$, maintaining average stash occupancy at $0.08$ entries and eliminating stash overflows entirely across $10^7$ updates.
+	Routing probability decreases monotonically in $\mathtt{MaxKicks}$,
+	the qualitative trend Lemma~\ref{lem:stash_routing_prob} predicts. The
+	\emph{absolute} values, however, are two to four orders of magnitude
+	higher than Corollary~\ref{cor:worked_example}'s toy $d=2$, $\alpha=0.5$
+	example suggested, and even at $\mathtt{MaxKicks}=24$, routing
+	probability ($2.4\times10^{-2}$) and overflow count (11,943 of
+	$2\times10^6$ insertions) remain far from negligible: at this
+	operating point, $s=4$ is not adequately sized. TBD: a sweep extending
+	to $\mathtt{MaxKicks}\in\{32,48,64\}$ and/or lower target load factors
+	(e.g.\ $\alpha\approx0.75$--$0.80$) to locate parameter combinations
+	that restore routing probability to the
+	Corollary~\ref{cor:worked_example}-style comfortable range
+	(\emph{technique}: extend the \texttt{MaxKicks} sweep already in
+	\texttt{bench.cpp} and re-run; this is the single most important
+	remaining experiment for this paper's parameter-choice claims).
 	
-	\section{Technical Edge Cases and Feasibility Analysis}
+	\section{Discussion}
+	\label{sec:discussion}
 	
-	This section addresses key theoretical edge cases, clarifies subtleties in stash failure derivations, and analyzes the operational boundaries governing physical hardware and software implementations.
+	\textbf{On the Correctness of Incremental Rehashing.} An earlier
+	version of \textsc{RehashStash} redrew fresh global hash functions
+	$h_1',\dots,h_d'$ on every stash overflow, reinserting only the
+	stashed key(s) under them. This silently broke every key already
+	resident in the main tables: their physical slot had been computed
+	under the \emph{old} $h_i$, so a lookup issued under the new ones would
+	almost never find them. The anomaly surfaced as an implausible
+	positive-lookup probe-count distribution, not as an outright crash,
+	and was isolated with a standalone occupancy diagnostic comparing
+	physical key placement against reported lookup behavior. The fix --
+	already reflected in Algorithm~\ref{alg:rehashstash} and
+	Section~\ref{sec:algorithm} -- keeps $h_1,\dots,h_d$ fixed for the
+	table's lifetime and relies only on randomized eviction-order retries.
+	This is simpler than the original design and removes the hazard
+	entirely, at the cost of making stash-overflow resolution strictly
+	harder (no "fresh restart" effect): this is the direct cause of the
+	higher-than-expected routing probabilities reported in
+	Section~\ref{sec:eval}D relative to an earlier, buggy measurement.
 	
-	\subsection{Technical Edge Cases and Analytical Corrections}
+	\textbf{Why Bound Kicks Instead of Just Shrinking $\mathtt{MaxLoop}$.}
+	A smaller constant in place of $\mathtt{MaxLoop}$ alone, with no
+	stash, converts the catastrophic-rehash problem into an
+	insertion-failure problem: keys that exhaust the bound are simply lost.
+	The stash is what makes bounding the chain a solution rather than a
+	different failure mode.
 	
-	\subsubsection{Kirsch et al. vs. Minaud--Papamanthou Failure Bounds}
-	Kirsch et al.~\cite{kirsch2009stash} originally established that appending an auxiliary stash of size $s$ to a cuckoo hash table reduces the asymptotic failure probability to $O(n^{-s-1})$ for single-item cells ($d=1$). However, when extending the analysis to multi-item buckets or multi-choice $d$-ary structures, they claimed a failure probability of $O(n^{(s+1)(1-d)})$.
+	\textbf{Choosing $\mathtt{MaxKicks}$ and Stash Size.} This paper does
+	not claim $\mathtt{MaxKicks}=16$, $s=4$ as a validated operating point
+	-- Section~\ref{sec:eval}D's measurements argue the opposite at
+	$\alpha\approx0.87$. Whether the right fix is a larger stash, a larger
+	$\mathtt{MaxKicks}$, a lower target load factor, or some combination is
+	left as the open, workload-dependent sizing question this paper's
+	remaining TBD items are aimed at answering, rather than one this paper
+	resolves by assumption.
 	
-	Minaud and Papamanthou~\cite{minaud2023generalized} disproved this bound, demonstrating that single-bucket overflow events $E_v$---wherein $d+s+1$ distinct keys map concurrently to the exact same bucket $v$---occur with probability $\Omega(n^{-d-s-1})$. They established the true tight asymptotic failure bound as:
-	\begin{equation}
-		\Pr[\text{Failure}] = \Theta(n^{-d-s})
-	\end{equation}
-	for constant choice parameter $d$ and stash capacity $s$. While $d=1$ yields $O(n^{-s-1})$ under both models, system architects designing multi-item or $d$-ary networking dictionaries must evaluate stash safety using the corrected Minaud--Papamanthou bound $\Theta(n^{-d-s})$ to avoid underestimating tail failure risks.
+	\section{Related Work}
+	\label{sec:related}
 	
-	\subsubsection{Bernoulli Independence Approximations in Chernoff Models}
-	In Section~III, stash-routing events across $n$ key insertions were modeled as independent Bernoulli trials $X_i \sim \text{Bernoulli}(p)$ to derive analytical Chernoff upper bounds. In an active cuckoo graph, displacement paths originating within the same connected component exhibit weak mutual dependencies.
+	TBD: reorganize into exactly two categories --
+	(1)~stash-based theoretical treatments that assume an unbounded search
+	before stash fallback~\cite{kirsch2009stash,kutzelnigg2010stash,aumuller2014explicit,fountoulakis2012sharp,noble2021explicit,minaud2023generalized,kuszmaul2025bubbling},
+	and (2)~networking-specific variants optimized for throughput or
+	energy rather than a worst-case insertion bound~\cite{pontarelli2016parallel,pontarelli2016cuckoocache,lescouarnec2018cuckoopp,xiong2025tecache,tripathi2026performance}
+	-- closing with one explicit sentence naming what is \emph{not} being
+	claimed as novel (stash-based cuckoo hashing itself, $d$-ary
+	candidate selection, or kick-capping in spirit, each already present
+	individually in the above) versus what specifically is (the coupling
+	of a tighter-than-necessary kick bound with early stash fallback and
+	incremental, non-global rehashing). Full paragraph-level treatment
+	already exists in the prior draft's Section~I-C and just needs
+	relocating/condensing here now that Introduction is being rewritten
+	separately.
 	
-	Under subcritical operational regimes ($\alpha < \alpha_d^*$), connected components remain small tree-like subgraphs of size $O(\log n)$ with high probability. Consequently, inter-key dependencies remain negligible, and the independent Bernoulli trial model matches empirical Monte Carlo evaluations within $1.2\%$ relative error. However, as load factors approach hypercritical thresholds ($\alpha \to \alpha_d^*$), connected components merge into a giant dense hypergraph core, making Poisson cloning models necessary to capture non-linear cascading displacements.
-	
-	\subsubsection{Hardware Memory Bank Contention and Dual-Port Dual-Bank Resolution}
-	In custom FPGA and ASIC hardware pipelines, concurrent sub-table probing requires mapping sub-tables $T_1, \dots, T_d$ to physically separate, multi-ported Block RAM (BRAM) or UltraRAM (URAM) memory banks. If two candidate hash functions $h_i(x)$ and $h_j(x)$ evaluate to slots within the same physical memory module, a bank contention conflict occurs, stalling the pipeline for one clock cycle. To maintain deterministic single-cycle execution, sub-table index spaces must be hard-partitioned across isolated hardware RAM banks.
-	
-	\subsection{Operational Edge Cases}
-	
-	\begin{enumerate}
-		\item \textbf{Adversarial Key Distributions (Denial-of-Service Attacks):} If an attacker generates keys specifically designed to trigger hash collisions across all $d$ sub-tables, candidate slots will collide repeatedly. While this cannot break the deterministic $O(1)$ worst-case probe bound per insertion (since the loop exits after $\mathtt{MaxKicks}$), it increases stash routing rates, eventually filling the stash and triggering \texttt{RehashStash}. Using hardware-accelerated AES-NI keyed hash functions prevents attackers from predicting candidate indices.
-		\item \textbf{Stash Size Trade-offs:} Sizing $s=4$ entries provides optimal hardware register usage and AVX2 vector matching. However, if load factor $\alpha$ exceeds the theoretical $d$-ary threshold ($91.7\%$ for $d=3$~\cite{fountoulakis2012sharp}), hypergraph core density grows rapidly, increasing stash overflow frequency. Maintaining proactive load monitoring ($\alpha \le 0.90$) prevents hypergraph saturation.
-		\item \textbf{Concurrent Data Plane Access:} In multi-threaded DPDK software switches, concurrent reader threads accessing slots during displacement updates require lock-free atomic read/write operations (e.g., C++ \texttt{std::atomic} key-value slots) to prevent readers from observing transient intermediate states during eviction swaps.
-	\end{enumerate}
-	
-	\subsection{Feasibility and Operational Boundaries}
-	
-	\subsubsection{Subcritical vs. Hypercritical Regimes}
-	The proposed bounded-displacement architecture is strictly designed for operation within the subcritical load factor regime ($\alpha \le \alpha_d^*$).
-	\begin{itemize}
-		\item \textbf{Subcritical Operating Point ($\alpha \le 0.917$ for $d=3$):} Hypergraph cores remain sparse, displacement sequences terminate rapidly, $p(\mathtt{MaxKicks}, \varepsilon)$ remains below $10^{-4}$, and a small $4$-entry stash absorbs all residual collisions without triggering table rebuilds.
-		\item \textbf{Hypercritical Operating Point ($\alpha > 0.917$ for $d=3$):} The cuckoo hypergraph forms a dense 2-core. Under these conditions, the empirical stash-routing probability approaches unity ($p \to 1$), quickly exhausting stash capacity $s$ and forcing frequent \textsc{RehashStash} calls.
-	\end{itemize}
-	The proactive load-factor monitor prevents transitions into the hypercritical regime by triggering table expansion before density saturation occurs.
-	
-	\subsubsection{Hardware Resource Footprint}
-	A 4-entry stash ($s=4$) storing 128-bit IPv4 5-tuples and metadata requires 512 bits of register or Content-Addressable Memory (CAM) storage. On a modern AMD/Xilinx UltraScale+ FPGA or custom 7nm switch ASIC, this layout consumes less than $0.01\%$ of available slice logic and memory resources. This confirms that trading a fractional hardware memory footprint for deterministic $O(1)$ worst-case insertion timing is highly practical for line-rate network substrates.
-	
-	\section{Synthesis and Conclusion}
-	
-	This paper has presented a $d$-ary cuckoo hashing architecture with explicitly bounded displacement and early stash fallback, tailored for line-rate exact-match flow tables in Software-Defined Networking (SDN) data planes. By replacing unbounded eviction searches with a fixed constant threshold $\mathtt{MaxKicks}$, the proposed design guarantees deterministic $O(1)$ worst-case insertion latency. Keys that exhaust $\mathtt{MaxKicks}$ displacements are proactively routed to a small Kirsch-style stash. Stash overflows trigger an incremental rehash procedure (\textsc{RehashStash}) that re-inserts only the $O(s)$ stashed keys under fresh hash functions, completely eliminating $O(n)$ full-table rebuilds during operational updates.
-	
-	Formal theoretical proofs established the deterministic $O(1)$ worst-case insertion bound, derived closed-form expressions for the non-vanishing stash-routing probability $p(\mathtt{MaxKicks}, \varepsilon)$, and modeled overall stash-overflow risks using multiplicative Chernoff bounds aligned with the Minaud--Papamanthou corrections. Extensive empirical evaluations using synthetic microflow traces and real-world CAIDA backbone traffic confirmed that setting $\mathtt{MaxKicks} \in [12, 24]$ with a 4-entry stash achieves zero full-table rehashes over $10^7$ dynamic updates at load factors up to $92\%$, outperforming classical cuckoo hashing, linear probing, and chained hashing in tail latency stability and worst-case predictability.
-	
-	Future research directions include extending bounded-displacement cuckoo hashing to stateful P4 data planes with automated flow expiration, investigating dynamic adaptive $\mathtt{MaxKicks}$ tuning driven by real-time traffic variance, and prototyping multi-terabit ASIC hardware deployments.
+	% ======================================================================
+	% CONCLUSION -- human-written. Insert here.
+	% ======================================================================
 	
 	\bibliographystyle{IEEEtran}
 	\bibliography{references}
 	
-\end{document} 
+\end{document}
